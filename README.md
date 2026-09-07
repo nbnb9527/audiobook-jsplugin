@@ -4,6 +4,10 @@ Songloft / MiMusic 有声书插件的修改版。基于官方 `audiobook.jsplugi
 
 > 作者署名：**MiMusic Team (修改：nb9527)**
 
+<img width="2297" height="1502" alt="RO5QOKGHHCP0WS_PF1FY909" src="https://github.com/user-attachments/assets/f42df531-0572-4695-8d4f-0ba28fa7f56d" />
+<img width="924" height="981" alt="8_2WLLSJF6A)NJJ{466MDVO" src="https://github.com/user-attachments/assets/86f49b18-2747-4214-b86d-a7a0f038810e" />
+<img width="2319" height="1428" alt="BY $CVSV8CHP(46CXN`%UZO" src="https://github.com/user-attachments/assets/9d842191-f3c2-459a-bcc9-8c69a8dc75f5" />
+
 ## 下载安装
 
 从 [Releases](https://github.com/nbnb9527/audiobook-jsplugin/releases) 下载最新 `audiobook.jsplugin.zip`，在 Songloft 宿主插件页上传安装（或覆盖原插件目录后热重载）。
@@ -23,7 +27,7 @@ Songloft / MiMusic 有声书插件的修改版。基于官方 `audiobook.jsplugi
 | P5 | 嵌套书库（多级分类目录）扫描混乱 | 嵌套书库模式 v2，按子文件夹成书 |
 | P6/P7 | 群晖 `@eaDir` 等缩略图目录被当成"有子目录"，每本书都生成"未分类合集"且丢封面/简介；含 `..` 的条目导致宿主 fs 整条拒绝 | 内置忽略名单（`@eaDir`、`@SynologyResource`、`#recycle`、`_ARCHIVE_TRASH`、`_DEDUPE_TRASH`、`@sharebin`），单本书内部同样跳过；`..` 条目剪枝 |
 
-### 二、书名别名系统
+### 二、书名别名系统（解决有声书标题不能修改的问题）
 
 - 编辑弹窗新增**别名字段**（保留原名提示），显示什么就能搜什么：关键词搜索、按书名排序均匹配别名。
 - 排序支持显式 `asc/desc` 方向。
@@ -33,6 +37,7 @@ Songloft / MiMusic 有声书插件的修改版。基于官方 `audiobook.jsplugi
 ### 三、显示与浏览
 
 - 主页工具栏新增**显示方式**（大图标/小图标/列表）与**顺序**下拉（排序 → 顺序 → 显示方式 → 只看收藏）。
+- 主页有声书图标和列表增加收藏、编辑和删除功能
 - 设置弹窗可配置**默认显示方式**（桌面端/手机端独立记忆）。
 - 分页区新增**页码输入框 + 跳转按钮**。
 - 主页「加载」与「设置」之间新增**刷新**按钮（只刷新列表，不重新扫描磁盘）。
