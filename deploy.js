@@ -1,11 +1,11 @@
 // 部署 audiobook 插件到 Songloft 宿主：登录 -> 上传 zip（覆盖更新自动热重载）-> 校验版本
-// 支持多主机：默认部署到 .69 与 .10 两台；也可用参数指定
+// 支持多主机：默认部署到 .88 与 .89 两台；也可用参数指定
 //   node deploy.js                       # 部署到全部默认主机
-//   node deploy.js 192.168.1.10:58090    # 只部署到指定主机（逗号分隔可多台）
+//   node deploy.js 192.168.1.88:8090    # 只部署到指定主机（逗号分隔可多台）,8090为Songloft端口
 const fs = require('fs');
 const path = require('path');
 
-const DEFAULT_HOSTS = 'http://192.168.1.69:58090,http://192.168.1.10:58090';
+const DEFAULT_HOSTS = 'http://192.168.1.88:8090,http://192.168.1.99:8090';
 const HOSTS = (process.argv[2] || DEFAULT_HOSTS)
   .split(',').map(s => s.trim()).filter(Boolean)
   .map(h => (h.startsWith('http') ? h : 'http://' + h));
