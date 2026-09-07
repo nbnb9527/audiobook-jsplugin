@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.13"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.14"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -678,6 +678,19 @@ def patch_static(build_dir: str) -> None:
               '        <button id="btnHomeRefresh" class="btn btn-ghost" title="刷新列表">\U0001F504 刷新</button>\n'
               '        <button id="btnSettings" class="btn btn-ghost" title="设置">⚙️</button>')
     html = rep(html, h9_old, h9_new, "H9")
+
+    # H10: 设置弹窗「关于」作者署名改为 MiMusic Team (修改：nb9527)
+    h10_old = ('<div class="settings-about-row"><span class="settings-about-label">作者</span><span>MiMusic Team</span></div>')
+    h10_new = ('<div class="settings-about-row"><span class="settings-about-label">作者</span><span>MiMusic Team (\u4fee\u6539\uff1anb9527)</span></div>')
+    html = rep(html, h10_old, h10_new, "H10")
+
+    # H11: 「项目主页」链接指向本仓库（nbnb9527/audiobook-jsplugin），
+    #      并在其后新增「原项目主页」链接指向官方基线仓库
+    h11_old = ('<a class="settings-project-link" href="https://github.com/mimusic-org/mimusic-jsplugin-releases/tree/audiobook" target="_blank" rel="noopener">\U0001F4DD 项目主页 · 提交 Issue</a>')
+    h11_new = ('<a class="settings-project-link" href="https://github.com/nbnb9527/audiobook-jsplugin" target="_blank" rel="noopener">\U0001F4DD 项目主页 · 提交 Issue</a>\n'
+               '            <a class="settings-project-link" href="https://github.com/mimusic-org/mimusic-jsplugin-releases/tree/audiobook" target="_blank" rel="noopener">\U0001F4E6 原项目主页</a>')
+    html = rep(html, h11_old, h11_new, "H11")
+
     open(html_path, "w", encoding="utf-8", newline="").write(html)
     print("  index.html: +显示方式/顺序下拉 +别名字段 +路径复制 +设置默认显示方式")
 
@@ -1179,6 +1192,8 @@ def main():
     manifest["version"] = PLUGIN_VERSION
     # 作者署名：原始作者 + 修改者
     manifest["author"] = "MiMusic Team (修改：nb9527)"
+    # 项目主页：指向本修改版仓库（原版 homepage 指向 mimusic-org 官方基线仓库）
+    manifest["homepage"] = "https://github.com/nbnb9527/audiobook-jsplugin"
     manifest["description"] = (
         "本地有声书管理与播放（修复版）：修复单本音频数超 65534 时扫描崩溃、"
         "递归深度不足 6 层、大书库扫描过慢的问题。"

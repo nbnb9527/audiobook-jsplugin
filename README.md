@@ -69,7 +69,7 @@ python build.py            # 提取 vendor/audiobook.jsplugin.zip → 应用补�
 |---|---|---|
 | `AUDIOBOOK_SRC_ZIP` | 官方原包路径 | `vendor/audiobook.jsplugin.zip` |
 | `JSC_EXE` | QuickJS 字节码编译器 | 本机 `@songloft/jsc-win32-x64` 安装路径 |
-| `PLUGIN_VERSION` | 插件版本号 | `1.3.13` |
+| `PLUGIN_VERSION` | 插件版本号 | `1.3.14` |
 
 ### CI 自动打包
 
