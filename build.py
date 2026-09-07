@@ -14,7 +14,16 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import zipfile
+
+# Windows CI runner 控制台默认 cp1252，中文 print 会 UnicodeEncodeError。
+# 强制 UTF-8 输出，同时兼容本机运行（已有 UTF-8 环境时重配置无害）。
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 

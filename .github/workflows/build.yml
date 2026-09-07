@@ -32,6 +32,8 @@ jobs:
       - name: Build plugin package
         env:
           JSC_EXE: node_modules/@songloft/jsc-win32-x64/bin/jsc.exe
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
         run: python build.py
 
       - name: Upload build artifact
