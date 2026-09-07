@@ -91,7 +91,7 @@ git tag v1.3.14 && git push origin v1.3.14   # 即发布一个新版本
 
 ```bash
 node deploy.js                        # 同时部署到两台已配置的 Songloft 宿主（HTTP 热重载）
-node deploy.js 192.168.1.10:58090     # 只部署指定宿主（逗号分隔多台）
+node deploy.js 192.168.1.88:8090     # 只部署指定宿主（逗号分隔多台）
 ```
 
 ## 仓库结构
