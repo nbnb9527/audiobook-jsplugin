@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.21"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.22"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -1671,7 +1671,8 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         "  border: 1px solid var(--border); max-width: 420px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n"
         ".scan-pill::before { content: \"\\27f3\"; display: inline-block; margin-right: 6px; color: var(--primary);\n"
         "  animation: scan-spin 1.2s linear infinite; }\n"
-        "@keyframes scan-spin { to { transform: rotate(360deg); } }\n")
+        "@keyframes scan-spin { to { transform: rotate(360deg); } }\n"
+        ".scan-pill[hidden] { display: none !important; }\n")
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     print("  style.css: +mode-small/mode-list +别名/路径/设置行样式")
