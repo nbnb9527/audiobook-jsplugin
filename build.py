@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.20"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.21"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -720,6 +720,92 @@ def patch_ui(src: str) -> str:
         assert src.count(p13_old) == 1, "P13 锚点数量异常"
         src = src.replace(p13_old, p13_new)
 
+    # P14: 扫描进度 —— 模块级 __SCANP 状态 + GET /api/scan-progress 轻量接口
+    #   全库扫描 _() 与目录重扫 __rescanDir 都会更新进度；
+    #   rootTotal/rootDone = 顶层文件夹进度（目录重扫时为 0，前端改用 dirs 计数展示）。
+    if not globals().get("SKIP_P14", False):
+        p14a_old = 'async function _(){let s=M,t={books:[],chaptersByBookId:{}},n=[];'
+        p14a_new = ('var __SCANP={scanning:!1,startedAt:0,rootTotal:0,rootDone:0,dirs:0,books:0,currentDir:""};'
+                    'async function _(){__SCANP.scanning=!0,__SCANP.startedAt=Date.now(),'
+                    '__SCANP.rootTotal=0,__SCANP.rootDone=0,__SCANP.dirs=0,__SCANP.books=0,__SCANP.currentDir="";'
+                    'let s=M,t={books:[],chaptersByBookId:{}},n=[];')
+        assert src.count(p14a_old) == 1, "P14a 锚点数量异常"
+        src = src.replace(p14a_old, p14a_new)
+
+        # 根目录分类完成后：顶层组总数
+        p14b_old = 'r.isDir?o.push(r.name):A(r.name)&&e.push(r.name)}'
+        p14b_new = 'r.isDir?o.push(r.name):A(r.name)&&e.push(r.name)}__SCANP.rootTotal=o.length,__SCANP.rootDone=0;'
+        assert src.count(p14b_old) == 1, "P14b 锚点数量异常"
+        src = src.replace(p14b_old, p14b_new)
+
+        # __D 入口：目录计数 + 当前目录
+        p14c_old = 'async function __D(s,rel,t,IG,d){if(d>20)return;'
+        p14c_new = 'async function __D(s,rel,t,IG,d){if(d>20)return;__SCANP.dirs++,d>0&&(__SCANP.currentDir=rel);'
+        assert src.count(p14c_old) == 1, "P14c 锚点数量异常"
+        src = src.replace(p14c_old, p14c_new)
+
+        # 叶子目录发现成书
+        p14d_old = 'a&&a.chapters.length>0&&(t.books.push(a.book),t.chaptersByBookId[a.book.id]=a.chapters)'
+        p14d_new = 'a&&a.chapters.length>0&&(t.books.push(a.book),t.chaptersByBookId[a.book.id]=a.chapters,__SCANP.books++)'
+        assert src.count(p14d_old) == 1, "P14d 锚点数量异常"
+        src = src.replace(p14d_old, p14d_new)
+
+        # 主循环：每个顶层文件夹开扫时更新当前目录
+        p14e_old = 'for(let r of o)try{await __D(s,r,t,__IGN,0)}catch(a){'
+        p14e_new = 'for(let r of o){__SCANP.currentDir=r;try{await __D(s,r,t,__IGN,0)}catch(a){'
+        assert src.count(p14e_old) == 1, "P14e 锚点数量异常"
+        src = src.replace(p14e_old, p14e_new)
+
+        # 主循环收尾：顶层组完成计数（补上 P14e 加的 for 花括号）
+        p14f_old = 'if(e.length>0)try{let r=await ut(s,e);'
+        p14f_new = '__SCANP.rootDone++}if(e.length>0)try{let r=await ut(s,e);'
+        assert src.count(p14f_old) == 1, "P14f 锚点数量异常"
+        src = src.replace(p14f_old, p14f_new)
+
+        # 根目录散落音频成书
+        p14g_old = 'r&&r.chapters.length>0&&(t.books.push(r.book),t.chaptersByBookId[r.book.id]=r.chapters)'
+        p14g_new = 'r&&r.chapters.length>0&&(t.books.push(r.book),t.chaptersByBookId[r.book.id]=r.chapters,__SCANP.books++)'
+        assert src.count(p14g_old) == 1, "P14g 锚点数量异常"
+        src = src.replace(p14g_old, p14g_new)
+
+        # _() 正常结束：关扫描标志
+        p14h_old = 'return t.books.sort((r,a)=>a.updatedAt-r.updatedAt),songloft.log.info('
+        p14h_new = 'return __SCANP.scanning=!1,__SCANP.currentDir="",t.books.sort((r,a)=>a.updatedAt-r.updatedAt),songloft.log.info('
+        assert src.count(p14h_old) == 1, "P14h 锚点数量异常"
+        src = src.replace(p14h_old, p14h_new)
+
+        # 三个调用方的 finally 兜底（异常/提前返回时也要关 __SCANP.scanning）
+        p14i1_old = 'finally{this.scanning=!1}}list(t){'
+        p14i1_new = 'finally{this.scanning=!1,__SCANP.scanning=!1}}list(t){'
+        assert src.count(p14i1_old) == 1, "P14i1 锚点数量异常"
+        src = src.replace(p14i1_old, p14i1_new)
+
+        p14i2_old = 'finally{this.scanning=!1}}getSettings(){'
+        p14i2_new = 'finally{this.scanning=!1,__SCANP.scanning=!1}}getSettings(){'
+        assert src.count(p14i2_old) == 1, "P14i2 锚点数量异常"
+        src = src.replace(p14i2_old, p14i2_new)
+
+        p14i3_old = 'finally{this.scanning=!1}}async rescan(){'
+        p14i3_new = 'finally{this.scanning=!1,__SCANP.scanning=!1}}async rescan(){'
+        assert src.count(p14i3_old) == 1, "P14i3 锚点数量异常"
+        src = src.replace(p14i3_old, p14i3_new)
+
+        # 目录重扫：重置进度（rootTotal=0 → 前端按“已扫目录数”展示）
+        p14j_old = 'this.scanning=!0;var g=++this.generation;'
+        p14j_new = ('__SCANP.scanning=!0,__SCANP.startedAt=Date.now(),'
+                    '__SCANP.rootTotal=0,__SCANP.rootDone=0,__SCANP.dirs=0,__SCANP.books=0,__SCANP.currentDir=dir;'
+                    'this.scanning=!0;var g=++this.generation;')
+        assert src.count(p14j_old) == 1, "P14j 锚点数量异常"
+        src = src.replace(p14j_old, p14j_new)
+
+        # 轻量进度接口（/api/snapshot 携带全量书单，轮询太重）
+        p14k_old = 's.get("/api/snapshot",async()=>f({success:!0,data:t.getSnapshot()})),'
+        p14k_new = ('s.get("/api/snapshot",async()=>f({success:!0,data:t.getSnapshot()})),'
+                    's.get("/api/scan-progress",()=>f({success:!0,data:Object.assign({},__SCANP,'
+                    '{elapsed:__SCANP.scanning?Date.now()-__SCANP.startedAt:0})})),')
+        assert src.count(p14k_old) == 1, "P14k 锚点数量异常"
+        src = src.replace(p14k_old, p14k_new)
+
     return src
 
 
@@ -897,6 +983,12 @@ def patch_static(build_dir: str) -> None:
               '        <button id="btnHomeRefresh" class="btn btn-ghost" title="刷新列表">\U0001F504 刷新</button>\n'
               '        <button id="btnSettings" class="btn btn-ghost" title="设置">⚙️</button>')
     html = rep(html, h9_old, h9_new, "H9")
+
+    # H16: 顶栏扫描进度徽标（扫描中显示进度，空闲隐藏）
+    h16_old = '        <button id="btnSettings" class="btn btn-ghost" title="设置">⚙️</button>'
+    h16_new = ('        <span id="scanStatus" class="scan-pill" hidden></span>\n'
+               '        <button id="btnSettings" class="btn btn-ghost" title="设置">⚙️</button>')
+    html = rep(html, h16_old, h16_new, "H16")
 
     # H10: 设置弹窗「关于」作者署名改为 MiMusic Team (修改：nb9527)
     h10_old = ('<div class="settings-about-row"><span class="settings-about-label">作者</span><span>MiMusic Team</span></div>')
@@ -1381,8 +1473,11 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                'return y("/api/rescan",{method:"POST",body:JSON.stringify(dir?{dir:dir}:{})}).then(()=>{'
                'u("\\u5df2\\u5f00\\u59cb\\u91cd\\u65b0\\u626b\\u63cf"+(dir?"\\uff1a"+dir:""));'
                'return new Promise(res=>{let n=0,iv=setInterval(async()=>{n++;'
-               'try{let s=await y("/api/snapshot");'
-               'if(!s.scanning||n>200){clearInterval(iv);w();if(!s.scanning)u("\\u626b\\u63cf\\u5b8c\\u6210\\uff0c\\u5171 "+s.totalBooks+" \\u672c");res()}}catch(e){}},3000)})})'
+               'try{let s=await y("/api/scan-progress");'
+               'if(!s.scanning||n>200){clearInterval(iv);w();'
+               'if(!s.scanning){let sn=null;try{sn=await y("/api/snapshot")}catch(_){}'
+               'u("\\u626b\\u63cf\\u5b8c\\u6210\\uff0c\\u5171 "+((sn&&sn.totalBooks)||"?")+" \\u672c")}'
+               'res()}}catch(e){}},2500)})})'
                '.catch(e=>{u("\\u542f\\u52a8\\u626b\\u63cf\\u5931\\u8d25\\uff1a"+e.message)});}'
                '(function(){let ov=document.getElementById("rescanOverlay");if(!ov||ov.dataset.b)return;ov.dataset.b="1";'
                'document.getElementById("rescanCancelBtn").addEventListener("click",()=>{ov.hidden=!0});'
@@ -1394,7 +1489,18 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                'let cbs=Array.prototype.slice.call(document.querySelectorAll("#rescanTree .rtree-cb:checked"));'
                'let dirs=cbs.map(c=>c.value);ov.hidden=!0;'
                'if(!dirs.length){Z();return}'
-               'for(let i=0;i<dirs.length;i++)await __doRescan(dirs[i])});})();')
+               'for(let i=0;i<dirs.length;i++)await __doRescan(dirs[i])});})();'
+               # J44: 全局扫描进度轮询 —— 顶栏徽标 + 扫描结束自动刷新列表
+               '(function(){if(window.__scanPoll)return;window.__scanPoll=1;let was=!1;'
+               'async function tick(){let st=document.getElementById("scanStatus");if(!st)return;'
+               'let p=null;try{p=await y("/api/scan-progress")}catch(e){return}'
+               'if(p&&p.scanning){was=!0;st.hidden=!1;'
+               'let prog=(p.rootTotal>0)?((p.rootDone||0)+"/"+p.rootTotal+" \\u7ec4"):((p.dirs||0)+" \\u4e2a\\u76ee\\u5f55");'
+               'let sec=Math.floor((p.elapsed||0)/1000),el=sec>=60?(Math.floor(sec/60)+"\\u5206"+(sec%60)+"\\u79d2"):(sec+"\\u79d2");'
+               'st.textContent="\\u626b\\u63cf\\u4e2d "+prog+" \\u00b7 \\u5df2\\u53d1\\u73b0 "+(p.books||0)+" \\u672c \\u00b7 "+el;'
+               'st.title="\\u5f53\\u524d\\u76ee\\u5f55\\uff1a"+(p.currentDir||"\\u6839\\u76ee\\u5f55")}'
+               'else{if(was){was=!1;w();u("\\u626b\\u63cf\\u5b8c\\u6210")}st.hidden=!0}}'
+               'setInterval(tick,3000);tick()})();')
     js = rep(js, j38_old, j38_new, "J38")
 
     # J39: 保存时 URL 下载兜底 —— 原版流程用浏览器 fetch(原图 URL)，防盗链/CORS 会失败；
@@ -1559,7 +1665,13 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         ".rtree-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }\n"
         ".rtree-row > .rtree-caret { cursor: pointer; padding: 4px 6px; color: var(--text-3); font-size: 12px; }\n"
         ".rtree-row > .rtree-caret:hover { color: var(--text); }\n"
-        ".rtree-msg { font-size: 12px; color: var(--text-3); padding: 6px 10px; }\n")
+        ".rtree-msg { font-size: 12px; color: var(--text-3); padding: 6px 10px; }\n"
+        ".scan-pill { display: inline-flex; align-items: center; margin-left: 6px; padding: 3px 12px;\n"
+        "  border-radius: 999px; font-size: 12px; color: var(--text-2); background: var(--surface-2);\n"
+        "  border: 1px solid var(--border); max-width: 420px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n"
+        ".scan-pill::before { content: \"\\27f3\"; display: inline-block; margin-right: 6px; color: var(--primary);\n"
+        "  animation: scan-spin 1.2s linear infinite; }\n"
+        "@keyframes scan-spin { to { transform: rotate(360deg); } }\n")
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     print("  style.css: +mode-small/mode-list +别名/路径/设置行样式")
