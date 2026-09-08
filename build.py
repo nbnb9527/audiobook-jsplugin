@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.16"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.17"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -535,9 +535,10 @@ def patch_ui(src: str) -> str:
                    'let UA=' + __COVER_UA + ';'
                    'let tmp=".cache/cover_dl.tmp";'
                    'try{await songloft.fs.mkdir(".cache",{recursive:!0})}catch(_){}'
-                   'let r=null;'
-                   'try{r=await songloft.command.exec("curl",["-s","-L","-m","30","-A",UA,"-o",tmp,u],{timeout:35e3})}catch(_){}'
-                   'if(!r||r.exitCode!==0)return h("\\u5bbf\\u4e3b\\u4e0b\\u8f7d\\u5931\\u8d25\\uff08\\u9700\\u8981 curl\\uff09",502);'
+                   'let r=null,dbg="";'
+                   'try{r=await songloft.command.exec("curl",["-s","-S","-L","-m","30","-A",UA,"-o",tmp,u],{timeout:35e3})}catch(e){dbg=String(e)}'
+                   'if(!r||r.exitCode!==0){try{r=await songloft.command.exec("wget",["-q","-O",tmp,"-T","30","-U",UA,u],{timeout:35e3})}catch(e){dbg=String(e)}}'
+                   'if(!r||r.exitCode!==0)return h("\\u5bbf\\u4e3b\\u4e0b\\u8f7d\\u5931\\u8d25\\uff1a"+(r?"exit="+r.exitCode+" "+String(r.stderr||"").slice(0,140):dbg||"\\u5bbf\\u4e3b\\u7f3a\\u5c11 curl/wget"),502);'
                    'let st=null;try{st=await songloft.fs.stat(tmp)}catch(_){}'
                    'if(!st||!Number(st.size))return h("\\u4e0b\\u8f7d\\u5185\\u5bb9\\u4e3a\\u7a7a",502);'
                    'if(Number(st.size)>15e6)return h("\\u56fe\\u7247\\u8fc7\\u5927\\uff08\\u8d85\\u8fc7 15MB\\uff09",413);'
@@ -546,6 +547,19 @@ def patch_ui(src: str) -> str:
                    'let mime="image/jpeg";'
                    'b64.indexOf("iVBORw0KGgo")===0?mime="image/png":b64.indexOf("R0lGOD")===0?mime="image/gif":b64.indexOf("UklGR")===0&&(mime="image/webp");'
                    'return f({success:!0,data:{base64:b64,dataUrl:"data:"+mime+";base64,"+b64}})}),'
+                   's.get("/api/cover-thumb",async o=>{'
+                   'let e=k(o.query||""),u=(e.u||"").trim();'
+                   'if(!u||!/^https?:\\/\\//.test(u))return h("\\u65e0\\u6548\\u7684\\u56fe\\u7247\\u5730\\u5740",400);'
+                   'let UA=' + __COVER_UA + ';'
+                   'let tmp=".cache/thumb_"+ct(u)+".jpg";'
+                   'try{await songloft.fs.mkdir(".cache",{recursive:!0})}catch(_){}'
+                   'let r=null;'
+                   'try{r=await songloft.command.exec("curl",["-s","-L","-m","12","-A",UA,"-o",tmp,u],{timeout:15e3})}catch(_){}'
+                   'if(!r||r.exitCode!==0){try{r=await songloft.command.exec("wget",["-q","-O",tmp,"-T","12","-U",UA,u],{timeout:15e3})}catch(_){}}'
+                   'if(!r||r.exitCode!==0)return h("\\u7f29\\u7565\\u56fe\\u4e0b\\u8f7d\\u5931\\u8d25\\uff08\\u9700\\u8981 curl/wget\\uff09",502);'
+                   'let st=null;try{st=await songloft.fs.stat(tmp)}catch(_){}'
+                   'if(!st||!Number(st.size))return h("\\u7f29\\u7565\\u56fe\\u4e3a\\u7a7a",502);'
+                   'return {serveFile:{filePath:tmp}}}),'
                    + p10_old)
         assert src.count(p10_old) == 1, "P10 锚点数量异常"
         src = src.replace(p10_old, p10_new)
@@ -1212,10 +1226,12 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                'if(!its.length){grid.innerHTML=\'<div class="edit-cover-empty">\\u672a\\u627e\\u5230\\u56fe\\u7247\\uff0c\\u6362\\u4e2a\\u5173\\u952e\\u8bcd\\u8bd5\\u8bd5</div>\';return}'
                'grid.innerHTML="";'
                'its.forEach(it=>{let im=document.createElement("img");'
-               'im.className="edit-cover-thumb";im.src=it.thumb;im.loading="lazy";im.title=it.url;'
+               'im.className="edit-cover-thumb";im.src="/api/v1/jsplugin/audiobook/api/cover-thumb?u="+encodeURIComponent(it.thumb);im.loading="lazy";im.title=it.url;'
+               'im.dataset.fb="0";'
+               'im.onerror=function(){if(im.dataset.fb==="0"){im.dataset.fb="1";im.src="/api/v1/jsplugin/audiobook/api/cover-thumb?u="+encodeURIComponent(it.url)}};'
                'im.addEventListener("click",()=>{'
                'document.getElementById("editCoverUrl").value=it.url;'
-               'document.getElementById("editCoverPreview").src=it.thumb;'
+               'document.getElementById("editCoverPreview").src="/api/v1/jsplugin/audiobook/api/cover-thumb?u="+encodeURIComponent(it.url);'
                'document.querySelectorAll(".edit-cover-thumb.sel").forEach(x=>x.classList.remove("sel"));'
                'im.classList.add("sel");'
                'u("\\u5df2\\u9009\\u62e9\\u5c01\\u9762\\uff0c\\u70b9\\u51fb\\u4fdd\\u5b58\\u751f\\u6548")});'
