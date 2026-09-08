@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.14"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.15"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -501,6 +501,55 @@ def patch_ui(src: str) -> str:
                   + p9_old)
         assert src.count(p9_old) == 1, "P9 锚点数量异常"
         src = src.replace(p9_old, p9_new)
+
+    # P10: 封面搜索（编辑弹窗用）
+    #   GET /api/cover-search?q=关键词  —— 宿主 curl 抓 Bing 图片搜索页，解析 murl(原图)/turl(缩略图)
+    #   GET /api/cover-download?url=    —— 宿主 curl 下载原图到 .cache → fs.readFile(base64) 返回
+    # 宿主 SDK 无原生 HTTP，只有 command.exec（ffmpeg 转码同款通道）；curl 不可用时回退 wget。
+    # 下载走「curl -o 临时文件 → fs 读 base64」，避免二进制经 exec stdout 传输被 UTF-8 解码破坏。
+    if not globals().get("SKIP_P10", False):
+        p10_old = 's.post("/api/books/:id/cover"'
+        __COVER_UA = ('"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                      '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"')
+        p10_new = ('s.get("/api/cover-search",async o=>{'
+                   'let e=k(o.query||""),q=(e.q||"").trim(),limit=Math.min(40,Math.max(6,parseInt(e.limit||"24",10)||24));'
+                   'if(!q)return h("\\u7f3a\\u5c11\\u641c\\u7d22\\u5173\\u952e\\u8bcd",400);'
+                   'let UA=' + __COVER_UA + ';'
+                   'let u="https://www.bing.com/images/search?q="+encodeURIComponent(q)+"&form=HDRSC2&count="+limit+"&mkt=zh-CN";'
+                   'let html="";'
+                   'try{let r=await songloft.command.exec("curl",["-s","-L","-m","15","-A",UA,u],{timeout:2e4});'
+                   'if(r&&r.exitCode===0&&r.stdout)html=r.stdout}catch(_){}'
+                   'if(!html){try{let r=await songloft.command.exec("wget",["-q","-O","-","-T","15","-U",UA,u],{timeout:2e4});'
+                   'if(r&&r.exitCode===0&&r.stdout)html=r.stdout}catch(_){}}'
+                   'if(!html)return h("\\u5bbf\\u4e3b\\u8054\\u7f51\\u5931\\u8d25\\uff1a\\u9700\\u8981 curl \\u6216 wget",502);'
+                   'let items=[],seen={},re=/m="([^"]+)"/g,m;'
+                   'while((m=re.exec(html))&&items.length<limit){'
+                   'let j=m[1].replace(/&quot;/g,String.fromCharCode(34)).replace(/&amp;/g,"&");'
+                   'let tu=(j.match(/"turl":"([^"]+)"/)||[])[1],mu=(j.match(/"murl":"([^"]+)"/)||[])[1];'
+                   'if(!mu||!tu||seen[mu])continue;seen[mu]=1;'
+                   'items.push({thumb:tu,url:mu})}'
+                   'return f({success:!0,data:{q:q,items:items}})}),'
+                   's.get("/api/cover-download",async o=>{'
+                   'let e=k(o.query||""),u=(e.url||"").trim();'
+                   'if(!u||!/^https?:\\/\\//.test(u))return h("\\u65e0\\u6548\\u7684\\u56fe\\u7247\\u5730\\u5740",400);'
+                   'let UA=' + __COVER_UA + ';'
+                   'let tmp=".cache/cover_dl.tmp";'
+                   'try{await songloft.fs.mkdir(".cache",{recursive:!0})}catch(_){}'
+                   'let r=null;'
+                   'try{r=await songloft.command.exec("curl",["-s","-L","-m","30","-A",UA,"-o",tmp,u],{timeout:35e3})}catch(_){}'
+                   'if(!r||r.exitCode!==0)return h("\\u5bbf\\u4e3b\\u4e0b\\u8f7d\\u5931\\u8d25\\uff08\\u9700\\u8981 curl\\uff09",502);'
+                   'let st=null;try{st=await songloft.fs.stat(tmp)}catch(_){}'
+                   'if(!st||!Number(st.size))return h("\\u4e0b\\u8f7d\\u5185\\u5bb9\\u4e3a\\u7a7a",502);'
+                   'if(Number(st.size)>15e6)return h("\\u56fe\\u7247\\u8fc7\\u5927\\uff08\\u8d85\\u8fc7 15MB\\uff09",413);'
+                   'let b64="";'
+                   'try{b64=await songloft.fs.readFile(tmp,{encoding:"base64"})}catch(_){return h("\\u8bfb\\u53d6\\u4e0b\\u8f7d\\u6587\\u4ef6\\u5931\\u8d25",500)}'
+                   'let mime="image/jpeg";'
+                   'b64.indexOf("iVBORw0KGgo")===0?mime="image/png":b64.indexOf("R0lGOD")===0?mime="image/gif":b64.indexOf("UklGR")===0&&(mime="image/webp");'
+                   'return f({success:!0,data:{base64:b64,dataUrl:"data:"+mime+";base64,"+b64}})}),'
+                   + p10_old)
+        assert src.count(p10_old) == 1, "P10 锚点数量异常"
+        src = src.replace(p10_old, p10_new)
+
     return src
 
 
@@ -690,6 +739,22 @@ def patch_static(build_dir: str) -> None:
     h11_new = ('<a class="settings-project-link" href="https://github.com/nbnb9527/audiobook-jsplugin" target="_blank" rel="noopener">\U0001F4DD 项目主页 · 提交 Issue</a>\n'
                '            <a class="settings-project-link" href="https://github.com/mimusic-org/mimusic-jsplugin-releases/tree/audiobook" target="_blank" rel="noopener">\U0001F4E6 原项目主页</a>')
     html = rep(html, h11_old, h11_new, "H11")
+
+    # H12: 编辑弹窗封面区增加「搜索封面」按钮 + 搜索结果面板（复用原版 URL→保存链路）
+    h12_old = ('<input type="text" id="editCoverUrl" placeholder="或输入图片 URL..." />\n'
+               '              <input type="file" id="editCoverFile" accept="image/*" />\n'
+               '            </div>\n'
+               '          </div>')
+    h12_new = ('<input type="text" id="editCoverUrl" placeholder="或输入图片 URL..." />\n'
+               '              <input type="file" id="editCoverFile" accept="image/*" />\n'
+               '              <button type="button" id="editCoverSearchBtn" class="btn btn-ghost">\U0001F50D 搜索封面</button>\n'
+               '            </div>\n'
+               '          </div>\n'
+               '          <div id="editCoverResults" class="edit-cover-results" hidden>\n'
+               '            <div class="edit-cover-kwrow"><input type="text" id="editCoverKw" placeholder="可先修改关键词（默认取别名/文件名）再搜索" /><button type="button" id="editCoverGo" class="btn btn-ghost">搜索</button></div>\n'
+               '            <div id="editCoverGrid" class="edit-cover-grid"></div>\n'
+               '          </div>')
+    html = rep(html, h12_old, h12_new, "H12")
 
     open(html_path, "w", encoding="utf-8", newline="").write(html)
     print("  index.html: +显示方式/顺序下拉 +别名字段 +路径复制 +设置默认显示方式")
@@ -1009,6 +1074,77 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
     j33_new = 't&&t.addEventListener("click",Z),document.getElementById("btnHomeRefresh").addEventListener("click",()=>{w()}),'
     js = rep(js, j33_old, j33_new, "J33")
 
+    # ===== v1.3.15 封面搜索（编辑弹窗）=====
+    # J38: 搜索面板逻辑。「搜索封面」打开面板并预填关键词（别名优先，其次原名），
+    #      点缩略图 → 原图 URL 填入 editCoverUrl → 复用原版「URL→保存」链路。
+    j38_old = ('document.getElementById("editCoverFile").addEventListener("change",e=>{'
+               'let t=e.target.files[0];if(!t)return;'
+               'let o=new FileReader;'
+               'o.onload=r=>{document.getElementById("editCoverPreview").src=r.target.result},'
+               'o.readAsDataURL(t)});')
+    j38_new = (j38_old +
+               'function __coverResetPanel(){let p=document.getElementById("editCoverResults");'
+               'if(p){p.hidden=!0;let g=document.getElementById("editCoverGrid");g&&(g.innerHTML="")}}'
+               'async function __coverDoSearch(kw){kw=(kw||"").trim();'
+               'let grid=document.getElementById("editCoverGrid");if(!grid)return;'
+               'if(!kw){grid.innerHTML=\'<div class="edit-cover-empty">\\u8bf7\\u8f93\\u5165\\u5173\\u952e\\u8bcd</div>\';return}'
+               'grid.innerHTML=\'<div class="edit-cover-empty">\\u641c\\u7d22\\u4e2d...</div>\';'
+               'try{let d=await y("/api/cover-search?q="+encodeURIComponent(kw)+"&limit=30");'
+               'let its=(d&&d.items)||[];'
+               'if(!its.length){grid.innerHTML=\'<div class="edit-cover-empty">\\u672a\\u627e\\u5230\\u56fe\\u7247\\uff0c\\u6362\\u4e2a\\u5173\\u952e\\u8bcd\\u8bd5\\u8bd5</div>\';return}'
+               'grid.innerHTML="";'
+               'its.forEach(it=>{let im=document.createElement("img");'
+               'im.className="edit-cover-thumb";im.src=it.thumb;im.loading="lazy";im.title=it.url;'
+               'im.addEventListener("click",()=>{'
+               'document.getElementById("editCoverUrl").value=it.url;'
+               'document.getElementById("editCoverPreview").src=it.thumb;'
+               'document.querySelectorAll(".edit-cover-thumb.sel").forEach(x=>x.classList.remove("sel"));'
+               'im.classList.add("sel");'
+               'u("\\u5df2\\u9009\\u62e9\\u5c01\\u9762\\uff0c\\u70b9\\u51fb\\u4fdd\\u5b58\\u751f\\u6548")});'
+               'grid.appendChild(im)})}catch(e){'
+               'grid.innerHTML=\'<div class="edit-cover-empty">\\u641c\\u7d22\\u5931\\u8d25\\uff1a\'+(e&&e.message||e)+"</div>"}}'
+               '(function(){let f=document.getElementById("editCoverFile");if(!f)return;'
+               'let btn=document.getElementById("editCoverSearchBtn");'
+               'btn&&!btn.dataset.bcs&&(btn.dataset.bcs="1",btn.addEventListener("click",()=>{'
+               'let p=document.getElementById("editCoverResults");if(!p)return;'
+               'let wasHidden=p.hidden;p.hidden=!1;'
+               'let kw=document.getElementById("editCoverKw");'
+               'if(!kw.dataset.b){kw.dataset.b="1";'
+               'kw.addEventListener("keydown",e=>{e.key==="Enter"&&__coverDoSearch(kw.value)})}'
+               'let go=document.getElementById("editCoverGo");'
+               'go&&!go.dataset.b&&(go.dataset.b="1",go.addEventListener("click",()=>__coverDoSearch(kw.value)));'
+               'if(wasHidden&&!kw.value){kw.value=document.getElementById("editTitle").value.trim()||window.__editOrig||"";'
+               'kw.focus()}}))})();')
+    js = rep(js, j38_old, j38_new, "J38")
+
+    # J39: 保存时 URL 下载兜底 —— 原版流程用浏览器 fetch(原图 URL)，防盗链/CORS 会失败；
+    #      失败时改走后端 /api/cover-download（宿主 curl 下载 → base64），结果不变。
+    j39_old = ('else if(l){let m=await fetch(l);'
+               'if(!m.ok)throw new Error("\\u65E0\\u6CD5\\u4E0B\\u8F7D\\u5C01\\u9762\\u56FE\\u7247\\uFF0C\\u8BF7\\u68C0\\u67E5 URL");'
+               'let p=await m.blob(),T=await new Promise((E,U)=>{let j=new FileReader;'
+               'j.onload=Be=>E(Be.target.result.split(",")[1]),'
+               'j.onerror=()=>U(new Error("\\u8F6C\\u6362\\u56FE\\u7247\\u5931\\u8D25")),'
+               'j.readAsDataURL(p)});'
+               'await y(`/api/books/${t}/cover`,{method:"POST",body:JSON.stringify({base64:T}),headers:{"Content-Type":"application/json"}})}')
+    j39_new = ('else if(l){let T="";'
+               'try{let m=await fetch(l);if(!m.ok)throw new Error("fetch fail");'
+               'let p=await m.blob();'
+               'T=await new Promise((E,U)=>{let j=new FileReader;'
+               'j.onload=Be=>E(Be.target.result.split(",")[1]),'
+               'j.onerror=()=>U(new Error("convert fail")),'
+               'j.readAsDataURL(p)})}'
+               'catch(_){let __d=await y("/api/cover-download?url="+encodeURIComponent(l));T=__d.base64}'
+               'await y(`/api/books/${t}/cover`,{method:"POST",body:JSON.stringify({base64:T}),headers:{"Content-Type":"application/json"}})}')
+    js = rep(js, j39_old, j39_new, "J39")
+
+    # J40: 打开编辑弹窗时收起上次的搜索结果面板
+    j40_old = ('document.getElementById("editCoverFile").value="",'
+               'document.getElementById("editOverlay").hidden=!1')
+    j40_new = ('document.getElementById("editCoverFile").value="",'
+               '__coverResetPanel(),'
+               'document.getElementById("editOverlay").hidden=!1')
+    js = rep(js, j40_old, j40_new, "J40")
+
     # J34: 修复播放结束自动跳章重复触发导致跳过一章的 bug
     # z() 在 ended/pause/timeupdate 三个事件下都会被调用；旧 guard O 基于 n.currentChapter.id，
     # 第一次调用后 B() 立即把 n.currentChapter 改为下一章，第二个 z() 就误判下一章也结束，从而连跳两章。
@@ -1096,6 +1232,15 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         ".delete-label { color: var(--text-3); flex-shrink: 0; min-width: 36px; }\n"
         ".delete-row code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; word-break: break-all; color: var(--text); background: var(--surface-2); padding: 2px 6px; border-radius: 4px; }\n"
 
+        "/* ===== v1.3.15 封面搜索 ===== */\n"
+        ".edit-cover-results { margin-top: 8px; border: 1px solid var(--border); border-radius: 8px; padding: 8px; background: var(--surface-2); }\n"
+        ".edit-cover-kwrow { display: flex; gap: 6px; margin-bottom: 8px; }\n"
+        ".edit-cover-kwrow input { flex: 1; }\n"
+        ".edit-cover-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); gap: 6px; max-height: 240px; overflow-y: auto; }\n"
+        ".edit-cover-thumb { width: 100%; height: 76px; object-fit: cover; border-radius: 6px; cursor: pointer; border: 2px solid transparent; background: var(--surface); }\n"
+        ".edit-cover-thumb:hover { border-color: var(--primary); opacity: .9; }\n"
+        ".edit-cover-thumb.sel { border-color: var(--primary); }\n"
+        ".edit-cover-empty { grid-column: 1 / -1; font-size: 12px; color: var(--text-3); padding: 8px 2px; }\n"
         "/* ===== v1.3.9 最近播放清理 + 页码跳转 ===== */\n"
         ".recent-card { position: relative; }\n"
         ".recent-del { position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; border-radius: 50%; border: none; background: rgba(0,0,0,0.35); color: #fff; font-size: 11px; line-height: 1; display: grid; place-items: center; cursor: pointer; opacity: 0; transition: opacity .2s; z-index: 2; }\n"
