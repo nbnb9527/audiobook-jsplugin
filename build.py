@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.15"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.16"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -550,6 +550,104 @@ def patch_ui(src: str) -> str:
         assert src.count(p10_old) == 1, "P10 锚点数量异常"
         src = src.replace(p10_old, p10_new)
 
+    # P11: 短篇合并 —— 同一分类目录（父目录）下章节数 ≤ 阈值（默认4，设置可调）的书
+    #   自动合并为一本虚拟合集「<父目录名>-短篇合集」：
+    #   - 扁平化：子书全部音频变合集章节，标题加《子书名》前缀，按 文件夹名→文件名 自然排序
+    #   - 章节 id 沿用子书派生（R(子书rel)-chNNN）→ 播放进度可双向迁移（合并/退出合集都不丢）
+    #   - 合集 isMisc=true → 与「未分类合集」一样禁止整本删除
+    #   - 书库根目录一级的短书不合并（避免巨无霸根合集），仅对分类目录生效
+    #   - 阈值存 settings.uiPrefs.shortsMergeThreshold（设置弹窗可调，0=关闭），扫描时读全局 __SHORTS_T
+    if not globals().get("SKIP_P11", False):
+        # p11a: 全局阈值变量 + 合并函数（插在 library 缓存键声明之前）
+        p11a_old = 'var W="audiobook_library_v1";'
+        p11a_new = ('var __SHORTS_T=4;'
+                    'function __SHORTS_VAL(v){return v==null?4:Number(v)||0}'
+                    'function __SHORTS_MERGE(t){'
+                    'var T=__SHORTS_T;if(!(T>=1))return;'
+                    'var groups={},rem={};'
+                    'for(var i=0;i<t.books.length;i++){'
+                    'var b=t.books[i];'
+                    'if(b.isMisc)continue;'
+                    'if((b.chapterCount||0)>T)continue;'
+                    'var p=b.folderRelPath||"",ix=p.lastIndexOf("/");'
+                    'if(ix<=0)continue;'
+                    'var par=p.substring(0,ix);'
+                    'if(par===M)continue;'
+                    '(groups[par]=groups[par]||[]).push(b)}'
+                    'for(var par in groups){'
+                    'var subs=groups[par];if(!subs.length)continue;'
+                    'subs.sort(function(a,b){return $(a.folderRelPath,b.folderRelPath)});'
+                    'var cs=[],size=0,upd=0,cover=null,cat="",tags={},names=[];'
+                    'for(var j=0;j<subs.length;j++){'
+                    'var b2=subs[j];rem[b2.id]=1;'
+                    'var chs=(t.chaptersByBookId[b2.id]||[]).slice();'
+                    'chs.sort(function(a,c){return $(a.fileRelPath,c.fileRelPath)});'
+                    'for(var m=0;m<chs.length;m++){'
+                    'var c2=chs[m];'
+                    'cs.push({id:c2.id,index:0,title:"\\u300a"+b2.title+"\\u300b"+c2.title,duration:c2.duration,fileSize:c2.fileSize,fileRelPath:c2.fileRelPath,modTime:c2.modTime})}'
+                    'if(!cover&&b2.coverUrl)cover=b2.coverUrl;'
+                    'if(!cat||cat==="\\u9ed8\\u8ba4")cat=b2.category||cat;'
+                    'names.push(b2.title);'
+                    'size+=b2.totalSize||0;'
+                    'if((b2.updatedAt||0)>upd)upd=b2.updatedAt;'
+                    'var tg=b2.tags||[];for(var q=0;q<tg.length;q++)tags[tg[q]]=1}'
+                    'for(var k2=0;k2<cs.length;k2++)cs[k2].index=k2+1;'
+                    'var pi=par.lastIndexOf("/"),pn=par.substring(pi+1);'
+                    'var mb={id:R(par+"/__shorts__"),title:pn+"-\\u77ed\\u7bc7\\u5408\\u96c6",author:"\\u5408\\u96c6",coverUrl:cover,coverRatio:"",'
+                    'description:"\\u7531 "+subs.length+" \\u672c\\u77ed\\u7bc7\\u6709\\u58f0\\u4e66\\u5408\\u5e76\\uff1a"+names.join("\\u3001"),'
+                    'category:cat||"\\u9ed8\\u8ba4",tags:Object.keys(tags),updatedAt:upd||Date.now(),chapterCount:cs.length,totalSize:size,folderRelPath:par,isMisc:!0};'
+                    't.books.push(mb);'
+                    't.chaptersByBookId[mb.id]=cs;'
+                    'songloft.log.info("\\u77ed\\u7bc7\\u5408\\u5e76\\uff1a"+pn+" \\u5408\\u5e76 "+subs.length+" \\u672c / "+cs.length+" \\u7ae0")}'
+                    'if(Object.keys(rem).length){'
+                    'var nb=[];for(var z=0;z<t.books.length;z++)if(!rem[t.books[z].id])nb.push(t.books[z]);'
+                    't.books=nb}}'
+                    + p11a_old)
+        assert src.count(p11a_old) == 1, "P11a 锚点数量异常"
+        src = src.replace(p11a_old, p11a_new)
+
+        # p11b: 扫描收尾时执行合并
+        p11b_old = 'return t.books.sort((r,a)=>a.updatedAt-r.updatedAt),'
+        p11b_new = '__SHORTS_MERGE(t);return t.books.sort((r,a)=>a.updatedAt-r.updatedAt),'
+        assert src.count(p11b_old) == 1, "P11b 锚点数量异常"
+        src = src.replace(p11b_old, p11b_new)
+
+        # p11c: 初始化与重扫前从 settings 读取阈值
+        p11c_old = 'this.scanInBackground()}async scanInBackground(){'
+        p11c_new = ('__SHORTS_T=__SHORTS_VAL((this.settings.uiPrefs||{}).shortsMergeThreshold),'
+                    'this.scanInBackground()}async scanInBackground(){')
+        assert src.count(p11c_old) == 1, "P11c 锚点数量异常"
+        src = src.replace(p11c_old, p11c_new)
+
+        # p11d: 进度双向迁移方法（插在 rescan 前）+ rescan 读阈值
+        p11d_old = 'async rescan(){++this.generation'
+        p11d_new = ('async __migShorts(t){'
+                    'var ids={},owner={};'
+                    'for(var i=0;i<t.books.length;i++){ids[t.books[i].id]=1;'
+                    'var cs=t.chaptersByBookId[t.books[i].id]||[];'
+                    'for(var j=0;j<cs.length;j++)owner[cs[j].id]=t.books[i].id}'
+                    'var changed=!1,keys=Object.keys(this.progress);'
+                    'for(var k=0;k<keys.length;k++){'
+                    'var K=keys[k],ix=K.indexOf("::");if(ix<0)continue;'
+                    'var bid=K.substring(0,ix),cid=K.substring(ix+2);'
+                    'if(ids[bid])continue;'
+                    'var nb=owner[cid];'
+                    'if(nb){this.progress[nb+"::"+cid]=this.progress[K];changed=!0}'
+                    'delete this.progress[K]}'
+                    'var fb=this.settings.favorites.length;'
+                    'this.settings.favorites=this.settings.favorites.filter(function(x){return ids[x]});'
+                    'if(changed)try{await songloft.storage.set(X,this.progress)}catch(_){}'
+                    'if(this.settings.favorites.length!==fb)await this.saveSettings()}'
+                    'async rescan(){__SHORTS_T=__SHORTS_VAL((this.settings.uiPrefs||{}).shortsMergeThreshold),++this.generation')
+        assert src.count(p11d_old) == 1, "P11d 锚点数量异常"
+        src = src.replace(p11d_old, p11d_new)
+
+        # p11e: 两次扫描完成后执行迁移（scanInBackground / rescan 共用片段，各 1 处）
+        p11e_old = 'this.scannedAt=Date.now(),await N(n),'
+        p11e_new = 'this.scannedAt=Date.now(),await N(n),await this.__migShorts(n),'
+        assert src.count(p11e_old) == 2, "P11e 锚点数量异常: %d" % src.count(p11e_old)
+        src = src.replace(p11e_old, p11e_new)
+
     return src
 
 
@@ -756,6 +854,26 @@ def patch_static(build_dir: str) -> None:
                '          </div>')
     html = rep(html, h12_old, h12_new, "H12")
 
+    # H13: 设置弹窗新增「短篇合并」区块（阈值下拉，0=关闭，默认4）
+    h13_old = ('主页面“显示方式”下拉可临时覆盖当前设备的默认值。</div>\n'
+               '          </div>')
+    _shorts_opts = "".join(
+        '                  <option value="%d">%s</option>\n' % (
+            v, ("关闭" if v == 0 else ("≤%d 章" % v))) for v in range(0, 11))
+    h13_new = (h13_old +
+               '          <div class="settings-section">\n'
+               '            <div class="settings-section-title">短篇合并</div>\n'
+               '            <div class="settings-pref-row">\n'
+               '              <label>合并阈值\n'
+               '                <select id="prefShortsThreshold">\n'
+               + _shorts_opts +
+               '                </select>\n'
+               '              </label>\n'
+               '            </div>\n'
+               '            <div class="settings-pref-desc">同一分类目录下章节数不超过阈值的有声书将自动合并为一本「短篇合集」，可显著减少书目数量（默认 ≤4 章）。保存后自动重新扫描生效；播放进度会双向迁移，不丢失。</div>\n'
+               '          </div>')
+    html = rep(html, h13_old, h13_new, "H13")
+
     open(html_path, "w", encoding="utf-8", newline="").write(html)
     print("  index.html: +显示方式/顺序下拉 +别名字段 +路径复制 +设置默认显示方式")
 
@@ -770,12 +888,12 @@ def patch_static(build_dir: str) -> None:
         "function __isMobile(){return window.matchMedia&&window.matchMedia(\"(max-width:768px)\").matches}\n"
         "function __getViewMode(){let d=__isMobile()?\"viewMobile\":\"viewDesktop\";try{let v=localStorage.getItem(d===\"viewMobile\"?\"ab_view_mobile\":\"ab_view_desktop\");if(v===\"large\"||v===\"small\"||v===\"list\")return v}catch(_){}return n.uiPrefs&&n.uiPrefs[d]||\"large\"}\n"
         "function __setViewMode(v){let d=__isMobile()?\"mobile\":\"desktop\";try{localStorage.setItem(\"ab_view_\"+d,v)}catch(_){}}\n"
-        "function __syncViewModeUI(){let s=document.getElementById(\"viewMode\");s&&(s.value=__getViewMode());let pd=document.getElementById(\"prefViewDesktop\");pd&&(pd.value=n.uiPrefs&&n.uiPrefs.viewDesktop||\"large\");let pm=document.getElementById(\"prefViewMobile\");pm&&(pm.value=n.uiPrefs&&n.uiPrefs.viewMobile||\"large\")}\n"
+        "function __syncViewModeUI(){let s=document.getElementById(\"viewMode\");s&&(s.value=__getViewMode());let pd=document.getElementById(\"prefViewDesktop\");pd&&(pd.value=n.uiPrefs&&n.uiPrefs.viewDesktop||\"large\");let pm=document.getElementById(\"prefViewMobile\");pm&&(pm.value=n.uiPrefs&&n.uiPrefs.viewMobile||\"large\");let pt=document.getElementById(\"prefShortsThreshold\");pt&&(pt.value=String(n.uiPrefs&&n.uiPrefs.shortsMergeThreshold!=null?n.uiPrefs.shortsMergeThreshold:4))}\n"
         "async function __savePrefs(p){n.uiPrefs=Object.assign({viewDesktop:\"large\",viewMobile:\"large\"},n.uiPrefs||{},p),__syncViewModeUI(),fe();try{await y(\"/api/ui-prefs\",{method:\"PUT\",body:JSON.stringify(p),headers:{\"Content-Type\":\"application/json\"}})}catch(e){u(\"\\u4FDD\\u5B58\\u663E\\u793A\\u8BBE\\u7F6E\\u5931\\u8D25\\uFF1A\"+e.message)}}\n"
         "function __relPath(p){if(!p)return\"\";let lp=String(n.libraryPath||\"/app/audiobook\").replace(/\\/+$/,\"\");return p===lp?\"\":p.indexOf(lp+\"/\")===0?p.substring(lp.length+1):p}\n"
         "async function __saveRate(id,rate){if(!id)return;n.playbackRates=n.playbackRates||{};n.playbackRates[id]=rate;try{localStorage.setItem(\"ab_rate_\"+id,String(rate))}catch(_){}try{await y(\"/api/books/\"+id+\"/rate\",{method:\"POST\",body:JSON.stringify({rate:rate}),headers:{\"Content-Type\":\"application/json\"}})}catch(_){}}\n"
         "function __restoreRate(id){if(!id)return;let v=0;try{v=parseFloat(localStorage.getItem(\"ab_rate_\"+id))}catch(_){}if(!v||isNaN(v))v=(n.playbackRates||{})[id]||0;if(!v)v=1;if([.75,1,1.25,1.5,1.75,2].indexOf(v)<0)v=1;n.speed=v;let o=document.getElementById(\"btnSpeedFull\");o&&(o.textContent=v+\"x\");let r=n.audioEl||b();r&&(r.playbackRate=v)}\n"
-        "function __initViewMode(){__syncViewModeUI();let s=document.getElementById(\"viewMode\");s&&!s.dataset.boundV&&(s.dataset.boundV=\"1\",s.addEventListener(\"change\",()=>{__setViewMode(s.value),fe()}));let pd=document.getElementById(\"prefViewDesktop\");pd&&!pd.dataset.boundV&&(pd.dataset.boundV=\"1\",pd.addEventListener(\"change\",()=>__savePrefs({viewDesktop:pd.value})));let pm=document.getElementById(\"prefViewMobile\");pm&&!pm.dataset.boundV&&(pm.dataset.boundV=\"1\",pm.addEventListener(\"change\",()=>__savePrefs({viewMobile:pm.value})));let cp=document.getElementById(\"editCopyPath\");cp&&!cp.dataset.boundV&&(cp.dataset.boundV=\"1\",cp.addEventListener(\"click\",async()=>{let v=document.getElementById(\"editBookPath\").value||\"\";try{await navigator.clipboard.writeText(v),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(e){let i=document.getElementById(\"editBookPath\");i.focus(),i.select();try{document.execCommand(\"copy\"),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(_){u(\"\\u590D\\u5236\\u5931\\u8D25\\uFF0C\\u8BF7\\u624B\\u52A8\\u9009\\u62E9\\u590D\\u5236\")}}}));try{let mq=window.matchMedia(\"(max-width:768px)\"),h=()=>{__syncViewModeUI(),fe()};mq.addEventListener?mq.addEventListener(\"change\",h):mq.addListener(h)}catch(_){}}\n"
+        "function __initViewMode(){__syncViewModeUI();let s=document.getElementById(\"viewMode\");s&&!s.dataset.boundV&&(s.dataset.boundV=\"1\",s.addEventListener(\"change\",()=>{__setViewMode(s.value),fe()}));let pd=document.getElementById(\"prefViewDesktop\");pd&&!pd.dataset.boundV&&(pd.dataset.boundV=\"1\",pd.addEventListener(\"change\",()=>__savePrefs({viewDesktop:pd.value})));let pm=document.getElementById(\"prefViewMobile\");pm&&!pm.dataset.boundV&&(pm.dataset.boundV=\"1\",pm.addEventListener(\"change\",()=>__savePrefs({viewMobile:pm.value})));let pt=document.getElementById(\"prefShortsThreshold\");pt&&!pt.dataset.boundV&&(pt.dataset.boundV=\"1\",pt.addEventListener(\"change\",async()=>{let v=parseInt(pt.value,10)||0;await __savePrefs({shortsMergeThreshold:v});try{await y(\"/api/rescan\",{method:\"POST\"}),u(v>0?\"\\u5DF2\\u4FDD\\u5B58\\uFF0C\\u6B63\\u5728\\u91CD\\u65B0\\u626B\\u63CF\\u4EE5\\u5E94\\u7528\\u77ED\\u7BC7\\u5408\\u5E76\":\"\\u5DF2\\u5173\\u95ED\\u77ED\\u7BC7\\u5408\\u5E76\\uFF0C\\u6B63\\u5728\\u91CD\\u65B0\\u626B\\u63CF\")}catch(e){u(\"\\u91CD\\u65B0\\u626B\\u63CF\\u5931\\u8D25\\uFF1A\"+e.message)}}));let cp=document.getElementById(\"editCopyPath\");cp&&!cp.dataset.boundV&&(cp.dataset.boundV=\"1\",cp.addEventListener(\"click\",async()=>{let v=document.getElementById(\"editBookPath\").value||\"\";try{await navigator.clipboard.writeText(v),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(e){let i=document.getElementById(\"editBookPath\");i.focus(),i.select();try{document.execCommand(\"copy\"),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(_){u(\"\\u590D\\u5236\\u5931\\u8D25\\uFF0C\\u8BF7\\u624B\\u52A8\\u9009\\u62E9\\u590D\\u5236\")}}}));try{let mq=window.matchMedia(\"(max-width:768px)\"),h=()=>{__syncViewModeUI(),fe()};mq.addEventListener?mq.addEventListener(\"change\",h):mq.addListener(h)}catch(_){}}\n"
         "function fe(){let e=document.getElementById(\"bookGrid\");if(e){"
         "e.classList.remove(\"mode-small\",\"mode-list\");"
         "let __vm=__getViewMode();__vm!==\"large\"&&e.classList.add(\"mode-\"+__vm);"
