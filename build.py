@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.19"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.20"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -694,6 +694,32 @@ def patch_ui(src: str) -> str:
         assert src.count(p12b_old) == 1, "P12b 锚点数量异常"
         src = src.replace(p12b_old, p12b_new)
 
+    # P13: 目录树懒加载接口 —— GET /api/list-dir?dir=相对路径（空=根）
+    #   每次只列一层子目录（含各自直接子目录数，供前端决定是否显示展开箭头）。
+    #   替代重扫弹窗原先对 /api/debug/dirs（一次性递归全树）的依赖：
+    #   大书库（.10 约 5693 本）全树遍历过慢导致请求超时、目录列不出来。
+    if not globals().get("SKIP_P13", False):
+        p13_old = 'return f({success:!0,data:{count:out.length,dirs:out}})})'
+        p13_new = ('return f({success:!0,data:{count:out.length,dirs:out}})}),'
+                   's.get("/api/list-dir",async o=>{'
+                   'let e=k(o.query||""),dir=String(e.dir||"").replace(/\\\\/g,"/").replace(/^\\/+|\\/+$/g,"");'
+                   'if(!__SAFE(dir))return h("\\u65e0\\u6548\\u76ee\\u5f55",400);'
+                   'var full=dir?M+"/"+dir:M;'
+                   'try{await songloft.fs.stat(full)}catch(_){return h("\\u76ee\\u5f55\\u4e0d\\u5b58\\u5728",404)}'
+                   'var es=[];try{es=await songloft.fs.readdir(full)||[]}catch(_){es=[]}'
+                   'var out=[];'
+                   'for(var i=0;i<es.length;i++){var x=es[i];'
+                   'if(!x.isDir||__IGN.has(x.name)||!__SAFE(x.name))continue;'
+                   'var sub=0,cs=[];'
+                   'try{cs=await songloft.fs.readdir(full+"/"+x.name)||[]}catch(_){cs=[]}'
+                   'for(var j2=0;j2<cs.length;j2++){var c=cs[j2];'
+                   'if(c.isDir&&!__IGN.has(c.name)&&__SAFE(c.name))sub++}'
+                   'out.push({name:x.name,rel:dir?dir+"/"+x.name:x.name,subdirs:sub})}'
+                   'out.sort(function(a,b){return a.name.localeCompare(b.name,"zh")});'
+                   'return f({success:!0,data:{path:dir,count:out.length,dirs:out}})})')
+        assert src.count(p13_old) == 1, "P13 锚点数量异常"
+        src = src.replace(p13_old, p13_new)
+
     return src
 
 
@@ -927,16 +953,22 @@ def patch_static(build_dir: str) -> None:
     if "点击右上角「加载」" in html:
         html = html.replace("点击右上角「加载」", "点击右上角「重新扫描」")
 
-    # H15: 重新扫描弹窗（全部 / 指定文件夹）
+    # H15: 重新扫描弹窗（全部 / 指定文件夹 —— 可折叠目录树，懒加载逐级展开）
     h15_old = "    <!-- 设置弹窗 -->"
     h15_new = ('    <!-- 重新扫描弹窗 -->\n'
                '    <div id="rescanOverlay" class="edit-overlay" hidden>\n'
                '      <div class="edit-modal delete-modal">\n'
                '        <h3>重新扫描</h3>\n'
                '        <p class="delete-info">选择扫描范围：可扫描整个书库，或只重新扫描某个文件夹（新增/移动文件后用它按需刷新，比全库扫描快得多）。</p>\n'
-               '        <div class="edit-field">\n'
-               '          <label for="rescanDirSel">扫描范围</label>\n'
-               '          <select id="rescanDirSel" style="width:100%"><option value="">全部重新扫描（整个书库）</option></select>\n'
+               '        <div class="rtree-wrap">\n'
+               '          <div class="rtree-head" id="rescanTreeHead">\n'
+               '            <div class="rtree-head-text">\n'
+               '              <div class="rtree-head-title">指定目录（可选）</div>\n'
+               '              <div class="rtree-head-sub">仅扫描选中的目录，留空则扫描整个书库；勾选多个将依次扫描</div>\n'
+               '            </div>\n'
+               '            <span class="rtree-caret">▾</span>\n'
+               '          </div>\n'
+               '          <div class="rtree" id="rescanTree"><div class="rtree-msg">加载中...</div></div>\n'
                '        </div>\n'
                '        <div class="edit-actions">\n'
                '          <button class="btn btn-ghost" id="rescanCancelBtn" type="button">取消</button>\n'
@@ -1311,27 +1343,58 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                'go&&!go.dataset.b&&(go.dataset.b="1",go.addEventListener("click",()=>__coverDoSearch(kw.value)));'
                'if(wasHidden){kw.value=document.getElementById("editTitle").value.trim()||window.__editOrig||"";'
                'kw.focus()}}))})();'
+               # J43: 重扫弹窗 —— 可折叠目录树（/api/list-dir 逐级懒加载），复选框多选、依次扫描
+               'function __rtreeRow(d,depth){'
+               'let row=document.createElement("div");row.className="rtree-row";'
+               'let cb=document.createElement("input");cb.type="checkbox";cb.className="rtree-cb";cb.value=d.rel;'
+               'let ic=document.createElement("span");ic.className="rtree-folder";ic.textContent="\\ud83d\\udcc1";'
+               'let lb=document.createElement("span");lb.className="rtree-label";lb.textContent=d.name;lb.title=d.rel;'
+               'lb.addEventListener("click",()=>{cb.checked=!cb.checked});'
+               'row.appendChild(cb);row.appendChild(ic);row.appendChild(lb);'
+               'let kids=null,caret=null;'
+               'if(d.subdirs>0){caret=document.createElement("span");caret.className="rtree-caret";caret.textContent="\\u25b8";'
+               'caret.addEventListener("click",async ev=>{ev.stopPropagation();'
+               'if(!kids){kids=document.createElement("div");kids.className="rtree-kids";'
+               'kids.innerHTML=\'<div class="rtree-msg" style="padding-left:\'+(8+(depth+1)*18)+\'px">\\u52a0\\u8f7d\\u4e2d...</div>\';'
+               'row.parentNode.insertBefore(kids,row.nextSibling);'
+               'try{let dd=await y("/api/list-dir?dir="+encodeURIComponent(d.rel));let arr=(dd&&dd.dirs)||[];'
+               'kids.innerHTML="";'
+               'if(!arr.length)kids.innerHTML=\'<div class="rtree-msg" style="padding-left:\'+(8+(depth+1)*18)+\'px">\\uff08\\u65e0\\u5b50\\u76ee\\u5f55\\uff09</div>\';'
+               'else arr.forEach(x=>kids.appendChild(__rtreeRow(x,depth+1)))}'
+               'catch(e){kids.innerHTML=\'<div class="rtree-msg">\\u52a0\\u8f7d\\u5931\\u8d25\\uff1a\'+(e&&e.message||e)+"</div>"}'
+               'kids.hidden=!1;caret.textContent="\\u25be";caret.classList.add("open")}'
+               'else{kids.hidden=!kids.hidden;caret.textContent=kids.hidden?"\\u25b8":"\\u25be";caret.classList.toggle("open",!kids.hidden)}});'
+               'row.appendChild(caret)}'
+               'row.style.paddingLeft=(8+depth*18)+"px";'
+               'return row}'
                'async function __openRescanModal(){'
                'let o=document.getElementById("rescanOverlay");if(!o)return;'
-               'let s=document.getElementById("rescanDirSel");'
-               's.innerHTML=\'<option value="">\\u5168\\u90e8\\u91cd\\u65b0\\u626b\\u63cf\\uff08\\u6574\\u4e2a\\u4e66\\u5e93\\uff09</option>\';s.value="";'
+               'let tr=document.getElementById("rescanTree");'
+               'tr.innerHTML=\'<div class="rtree-msg">\\u52a0\\u8f7d\\u4e2d...</div>\';'
                'o.hidden=!1;'
-               'try{let d=await y("/api/debug/dirs");let dirs=(d&&d.dirs)||[];let seen={};'
-               'dirs.forEach(x=>{let p=(x&&x.path)||"";if(!p||seen[p])return;seen[p]=1;'
-               'let depth=p.split("/").filter(Boolean).length;if(depth>2)return;'
-               'let op=document.createElement("option");op.value=p;'
-               'op.textContent=p+(x.files>0?"\\uff08"+x.files+" \\u4e2a\\u97f3\\u9891\\uff09":"");'
-               's.appendChild(op)})}catch(e){}}'
-               'async function __doRescan(dir){'
-               'try{await y("/api/rescan",{method:"POST",body:JSON.stringify(dir?{dir:dir}:{})})}catch(e){u("\\u542f\\u52a8\\u626b\\u63cf\\u5931\\u8d25\\uff1a"+e.message);return}'
+               'try{let d=await y("/api/list-dir");let arr=(d&&d.dirs)||[];'
+               'tr.innerHTML="";'
+               'if(!arr.length){tr.innerHTML=\'<div class="rtree-msg">\\u4e66\\u5e93\\u6839\\u76ee\\u5f55\\u4e0b\\u6ca1\\u6709\\u5b50\\u76ee\\u5f55</div>\';return}'
+               'arr.forEach(x=>tr.appendChild(__rtreeRow(x,0)))}'
+               'catch(e){tr.innerHTML=\'<div class="rtree-msg">\\u76ee\\u5f55\\u52a0\\u8f7d\\u5931\\u8d25\\uff1a\'+(e&&e.message||e)+"</div>"}}'
+               'function __doRescan(dir){'
+               'return y("/api/rescan",{method:"POST",body:JSON.stringify(dir?{dir:dir}:{})}).then(()=>{'
                'u("\\u5df2\\u5f00\\u59cb\\u91cd\\u65b0\\u626b\\u63cf"+(dir?"\\uff1a"+dir:""));'
-               'let n=0,iv=setInterval(async()=>{n++;'
+               'return new Promise(res=>{let n=0,iv=setInterval(async()=>{n++;'
                'try{let s=await y("/api/snapshot");'
-               'if(!s.scanning||n>200){clearInterval(iv);w();if(!s.scanning)u("\\u626b\\u63cf\\u5b8c\\u6210\\uff0c\\u5171 "+s.totalBooks+" \\u672c")}}catch(e){}},3000);}'
+               'if(!s.scanning||n>200){clearInterval(iv);w();if(!s.scanning)u("\\u626b\\u63cf\\u5b8c\\u6210\\uff0c\\u5171 "+s.totalBooks+" \\u672c");res()}}catch(e){}},3000)})})'
+               '.catch(e=>{u("\\u542f\\u52a8\\u626b\\u63cf\\u5931\\u8d25\\uff1a"+e.message)});}'
                '(function(){let ov=document.getElementById("rescanOverlay");if(!ov||ov.dataset.b)return;ov.dataset.b="1";'
                'document.getElementById("rescanCancelBtn").addEventListener("click",()=>{ov.hidden=!0});'
                'ov.addEventListener("click",e=>{e.target===ov.currentTarget&&(ov.hidden=!0)});'
-               'document.getElementById("rescanOkBtn").addEventListener("click",()=>{let s=document.getElementById("rescanDirSel");let dir=s.value;ov.hidden=!0;dir?__doRescan(dir):Z()});})();')
+               'document.getElementById("rescanTreeHead").addEventListener("click",()=>{'
+               'let tr=document.getElementById("rescanTree");tr.hidden=!tr.hidden;'
+               'document.getElementById("rescanTreeHead").classList.toggle("collapsed",tr.hidden)});'
+               'document.getElementById("rescanOkBtn").addEventListener("click",async()=>{'
+               'let cbs=Array.prototype.slice.call(document.querySelectorAll("#rescanTree .rtree-cb:checked"));'
+               'let dirs=cbs.map(c=>c.value);ov.hidden=!0;'
+               'if(!dirs.length){Z();return}'
+               'for(let i=0;i<dirs.length;i++)await __doRescan(dirs[i])});})();')
     js = rep(js, j38_old, j38_new, "J38")
 
     # J39: 保存时 URL 下载兜底 —— 原版流程用浏览器 fetch(原图 URL)，防盗链/CORS 会失败；
@@ -1478,7 +1541,25 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         ".book-grid:not(.mode-list) .book-card:hover .book-card-fav.on { color: #ffd000; }\n"
         ".book-grid:not(.mode-list) .book-card-fav:hover { background: rgba(0,0,0,0.72); color: #ffd000; }\n"
         ".book-grid.mode-list .book-card-fav { cursor: pointer; }\n"
-        ".book-grid.mode-list .book-card-fav:hover { color: #ffd000; background: var(--surface-2); }\n")
+        ".book-grid.mode-list .book-card-fav:hover { color: #ffd000; background: var(--surface-2); }\n"
+        "/* ===== v1.3.20 重扫弹窗：可折叠目录树 ===== */\n"
+        ".rtree-wrap { border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); overflow: hidden; margin-bottom: 14px; }\n"
+        ".rtree-head { display: flex; align-items: center; gap: 10px; padding: 10px 12px; cursor: pointer; user-select: none; }\n"
+        ".rtree-head-text { flex: 1; min-width: 0; }\n"
+        ".rtree-head-title { font-size: 14px; font-weight: 600; color: var(--text); }\n"
+        ".rtree-head-sub { font-size: 12px; color: var(--text-3); margin-top: 2px; }\n"
+        ".rtree-head .rtree-caret { font-size: 12px; transition: transform .15s; flex-shrink: 0; }\n"
+        ".rtree-head.collapsed .rtree-caret { transform: rotate(-90deg); }\n"
+        ".rtree { max-height: 320px; overflow-y: auto; border-top: 1px solid var(--border); padding: 6px 4px; background: var(--surface); }\n"
+        ".rtree-head.collapsed + .rtree { display: none; }\n"
+        ".rtree-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; font-size: 13px; color: var(--text); }\n"
+        ".rtree-row:hover { background: var(--surface-2); }\n"
+        ".rtree-cb { flex-shrink: 0; width: 15px; height: 15px; accent-color: var(--primary); cursor: pointer; }\n"
+        ".rtree-folder { flex-shrink: 0; font-size: 14px; line-height: 1; }\n"
+        ".rtree-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }\n"
+        ".rtree-row > .rtree-caret { cursor: pointer; padding: 4px 6px; color: var(--text-3); font-size: 12px; }\n"
+        ".rtree-row > .rtree-caret:hover { color: var(--text); }\n"
+        ".rtree-msg { font-size: 12px; color: var(--text-3); padding: 6px 10px; }\n")
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     print("  style.css: +mode-small/mode-list +别名/路径/设置行样式")
