@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.23"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.25"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -863,6 +863,135 @@ def patch_ui(src: str) -> str:
         assert src.count(p15d_old) == 1, "P15d 锚点数量异常"
         src = src.replace(p15d_old, p15d_new)
 
+    # P16: 增量 + 断点续扫
+    #   - 每个「成书目录」按 (音频文件名列表 + 非音频文件名列表 + metadata.json 修改时间) 生成签名，
+    #     签名未变则直接复用上次的书籍/章节，跳过全部 stat（大书库提速的关键）。
+    #   - 每扫完一个顶层组就把该组结果写入分片 .cache/abscan/<hash>.json，
+    #     中途被打断也不会白扫：下次运行直接复用已完成分组的分片，继续未完成的分组。
+    #   - 手动触发的「重新扫描」可勾选 force 强制全量（忽略分片缓存）。
+    if not globals().get("SKIP_P16", False):
+        p16a_old = 'var __SCANP={scanning:!1,startedAt:0,rootTotal:0,rootDone:0,dirs:0,books:0,currentDir:""};'
+        p16a_new = (p16a_old +
+                    '__SCANP.fastHit=0,__SCANP.fastMiss=0,__SCANP.fastProbe="";'
+                    'var __SHD=".cache/abscan";'
+                    'var __SH_OLD={},__SH_NEW={},__SH_GRP="",__SH_FORCE=0,__SH_REUSE=0;'
+                    'async function __shSig(auds,others,dir){'
+                    'let h=ct(auds.join("|")+"#"+others.join("|"));'
+                    'try{let m=await songloft.fs.stat(dir+"/metadata.json");if(m)h+="-"+Number(m.modTime||0)}catch(_){}'
+                    'return h}'
+                    'async function __shLoad(){let out={};'
+                    'try{let es=await songloft.fs.readdir(__SHD)||[];'
+                    'for(let i=0;i<es.length;i++){if(es[i].isDir)continue;'
+                    'try{let j=JSON.parse(await songloft.fs.readFile(__SHD+"/"+es[i].name));'
+                    'if(j&&j.items)for(let k=0;k<j.items.length;k++){let it=j.items[k];if(it&&it.rel)out[it.rel]=it}}catch(_){}}}catch(_){}'
+                    'return out}'
+                    'async function __shSave(g,items){'
+                    'try{await songloft.fs.mkdir(__SHD,{recursive:!0})}catch(_){}'
+                    'try{await songloft.fs.writeFile(__SHD+"/"+ct(g)+".json",JSON.stringify({g:g,ts:Date.now(),items:items||[]}))}catch(_){}}'
+                    # 快通道：整组的目录 mtime 全部未变 → 整组直接复用，连目录遍历都省掉
+                    'async function __shFast(g,s){'
+                    'if(__SH_FORCE)return null;'
+                    'var list=[];for(var k in __SH_OLD){var it=__SH_OLD[k];'
+                    'if(it&&(it.rel===g||it.rel.indexOf(g+"/")===0))list.push(it)}'
+                    'if(!list.length)return null;'
+                    'for(var i=0;i<list.length;i+=16){var b=list.slice(i,i+16);'
+                    'var rs=await Promise.all(b.map(async it=>{'
+                    'try{var st=await songloft.fs.stat(it.rel?s+"/"+it.rel:s);return Number((st&&st.modTime)||0)}'
+                    'catch(e){return -1}}));'
+                    'for(var j=0;j<b.length;j++){var mv=rs[j];'
+                    'if(!mv||mv!==b[j].mt){__SCANP.fastProbe=String(b[j].rel)+" exp"+b[j].mt+" act"+mv;return null}}}'
+                    'return list}')
+        assert src.count(p16a_old) == 1, "P16a 锚点数量异常"
+        src = src.replace(p16a_old, p16a_new)
+
+        # _() 根目录分类后：载入分片缓存
+        p16b_old = '__SCANP.rootTotal=o.length,__SCANP.rootDone=0;'
+        p16b_new = ('__SCANP.rootTotal=o.length,__SCANP.rootDone=0;'
+                    '__SH_OLD=__SH_FORCE?{}:await __shLoad(),__SH_NEW={},__SH_GRP="",__SH_REUSE=0,'
+                    '__SCANP.fastHit=0,__SCANP.fastMiss=0,__SCANP.fastProbe="";')
+        assert src.count(p16b_old) == 1, "P16b 锚点数量异常"
+        src = src.replace(p16b_old, p16b_new)
+
+        # 顶层组循环：开扫前建分组容器，完成后写分片
+        p16c_old = 'for(let r of o){__SCANP.currentDir=r;try{await __D(s,r,t,__IGN,0)}catch(a){'
+        p16c_new = ('for(let r of o){__SCANP.currentDir=r;__SH_GRP=r;__SH_NEW[r]=[];'
+                    'let __fl=await __shFast(r,s);__fl?__SCANP.fastHit++:__SCANP.fastMiss++;'
+                    'if(__fl){for(let i=0;i<__fl.length;i++){let it=__fl[i];'
+                    'if(it.book&&it.chapters){t.books.push(it.book),t.chaptersByBookId[it.book.id]=it.chapters,'
+                    '__SCANP.books++,__SH_REUSE++}__SH_NEW[r].push(it)}__SCANP.dirs+=__fl.length}'
+                    'else{try{await __D(s,r,t,__IGN,0)}catch(a){')
+        assert src.count(p16c_old) == 1, "P16c 锚点数量异常"
+        src = src.replace(p16c_old, p16c_new)
+
+        p16d_old = '__SCANP.rootDone++}if(e.length>0)try{let r=await ut(s,e);'
+        p16d_new = ('}__SCANP.rootDone++;try{await __shSave(r,__SH_NEW[r])}catch(_){}}'
+                    'if(e.length>0)try{let r=await ut(s,e);')
+        assert src.count(p16d_old) == 1, "P16d 锚点数量异常"
+        src = src.replace(p16d_old, p16d_new)
+
+        # __D 叶子分支：签名命中则复用，否则照常扫描并写入本组分片
+        p16e_old = ('try{let a=await gt(pa,nm,rel);'
+                    'a&&a.chapters.length>0&&(t.books.push(a.book),t.chaptersByBookId[a.book.id]=a.chapters,__SCANP.books++)}')
+        p16e_new = ('try{let __ot=[];for(let __i=0;__i<es.length;__i++){let __x=es[__i];'
+                    'if(!__x.isDir&&!A(__x.name))__ot.push(__x.name)}__ot.sort();'
+                    'let __sig=await __shSig(auds,__ot,dir),__hit=__SH_OLD[rel];'
+                    'if(__hit&&__hit.sig===__sig&&__hit.book&&__hit.chapters){'
+                    't.books.push(__hit.book),t.chaptersByBookId[__hit.book.id]=__hit.chapters,'
+                    '__SCANP.books++,__SH_REUSE++;__SH_NEW[__SH_GRP]&&'
+                    '__SH_NEW[__SH_GRP].push(Object.assign({},__hit,{mt:__mt}))}'
+                    'else{let a=await gt(pa,nm,rel);'
+                    'if(a&&a.chapters.length>0){t.books.push(a.book),t.chaptersByBookId[a.book.id]=a.chapters,__SCANP.books++;'
+                    '__SH_NEW[__SH_GRP]&&__SH_NEW[__SH_GRP].push({rel:rel,mt:__mt,sig:__sig,book:a.book,chapters:a.chapters})}}}')
+        assert src.count(p16e_old) == 1, "P16e 锚点数量异常"
+        src = src.replace(p16e_old, p16e_new)
+
+        # __D：采集目录 mtime（每个目录 1 次 stat，供下次扫描的整组快通道比对）
+        p16m_old = 'let subs=[],auds=[];'
+        p16m_new = ('let __mt=0;try{let __ds=await songloft.fs.stat(dir);'
+                    '__mt=Number((__ds&&__ds.modTime)||0)}catch(_){}'
+                    'let subs=[],auds=[];')
+        assert src.count(p16m_old) == 1, "P16m 锚点数量异常"
+        src = src.replace(p16m_old, p16m_new)
+
+        # 空白叶子目录也要落条目（否则快通道漏掉它，删除/新增空目录检测不到）
+        p16n_old = 'if(subs.length===0){if(auds.length===0)return;'
+        p16n_new = ('if(subs.length===0){if(auds.length===0){'
+                    '__SH_NEW[__SH_GRP]&&__SH_NEW[__SH_GRP].push({rel:rel,mt:__mt,sig:""});return;}')
+        assert src.count(p16n_old) == 1, "P16n 锚点数量异常"
+        src = src.replace(p16n_old, p16n_new)
+
+        # 非叶子目录同样落条目（只记 mtime），用于检测子目录增删
+        p16o_old = 'for(let x of subs)await __D(s,rel+"/"+x,t,IG,d+1);'
+        p16o_new = ('__SH_NEW[__SH_GRP]&&__SH_NEW[__SH_GRP].push({rel:rel,mt:__mt,sig:""});'
+                    'for(let x of subs)await __D(s,rel+"/"+x,t,IG,d+1);')
+        assert src.count(p16o_old) == 1, "P16o 锚点数量异常"
+        src = src.replace(p16o_old, p16o_new)
+
+        # force 开关：/api/rescan 传入 {force:true} 时忽略分片；目录重扫同理
+        p16f_old = 'if(d&&d.dir){'
+        p16f_new = '__SH_FORCE=(d&&d.force)?1:0;if(d&&d.dir){'
+        assert src.count(p16f_old) == 1, "P16f 锚点数量异常"
+        src = src.replace(p16f_old, p16f_new)
+
+        # 复位 force（rescan / __rescanDir 结束）
+        p16g_old = 'finally{this.scanning=!1,__SCANP.scanning=!1}}getSettings(){'
+        p16g_new = 'finally{this.scanning=!1,__SCANP.scanning=!1,__SH_FORCE=0}}getSettings(){'
+        assert src.count(p16g_old) == 1, "P16g 锚点数量异常"
+        src = src.replace(p16g_old, p16g_new)
+
+        p16h_old = 'finally{this.scanning=!1,__SCANP.scanning=!1}}async rescan(){'
+        p16h_new = 'finally{this.scanning=!1,__SCANP.scanning=!1,__SH_FORCE=0}}async rescan(){'
+        assert src.count(p16h_old) == 1, "P16h 锚点数量异常"
+        src = src.replace(p16h_old, p16h_new)
+
+        # scan-progress 附带复用计数，便于确认增量是否生效
+        p16i_old = 'lastScanAt:t.settings.lastScanAt||0})})),'
+        p16i_new = ('lastScanAt:t.settings.lastScanAt||0,reused:__SH_REUSE||0,'
+                    'fastHit:__SCANP.fastHit||0,fastMiss:__SCANP.fastMiss||0,'
+                    'fastProbe:__SCANP.fastProbe||""})})),')
+        assert src.count(p16i_old) == 1, "P16i 锚点数量异常"
+        src = src.replace(p16i_old, p16i_new)
+
     return src
 
 
@@ -1144,6 +1273,7 @@ def patch_static(build_dir: str) -> None:
                '          </div>\n'
                '          <div class="rtree" id="rescanTree"><div class="rtree-msg">加载中...</div></div>\n'
                '          <div class="rtree-msg" id="rescanLastInfo"></div>\n'
+               '          <label class="rtree-force"><input type="checkbox" id="rescanForce" /> 忽略缓存，强制全量扫描（默认增量：只重扫有变动的目录，快很多）</label>\n'
                '        </div>\n'
                '        <div class="edit-actions">\n'
                '          <button class="btn btn-ghost" id="rescanCancelBtn" type="button">取消</button>\n'
@@ -1558,8 +1688,9 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                'if(!arr.length){tr.innerHTML=\'<div class="rtree-msg">\\u4e66\\u5e93\\u6839\\u76ee\\u5f55\\u4e0b\\u6ca1\\u6709\\u5b50\\u76ee\\u5f55</div>\';return}'
                'arr.forEach(x=>tr.appendChild(__rtreeRow(x,0)))}'
                'catch(e){tr.innerHTML=\'<div class="rtree-msg">\\u76ee\\u5f55\\u52a0\\u8f7d\\u5931\\u8d25\\uff1a\'+(e&&e.message||e)+"</div>"}}'
-               'function __doRescan(dir){'
-               'return y("/api/rescan",{method:"POST",body:JSON.stringify(dir?{dir:dir}:{})}).then(()=>{'
+               'function __doRescan(dir,force){'
+               'let body=dir?{dir:dir,force:force?1:0}:{force:force?1:0};'
+               'return y("/api/rescan",{method:"POST",body:JSON.stringify(body)}).then(()=>{'
                'u("\\u5df2\\u5f00\\u59cb\\u91cd\\u65b0\\u626b\\u63cf"+(dir?"\\uff1a"+dir:""));'
                'return new Promise(res=>{let n=0,iv=setInterval(async()=>{n++;'
                'try{let s=await y("/api/scan-progress");'
@@ -1577,8 +1708,9 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                'document.getElementById("rescanOkBtn").addEventListener("click",async()=>{'
                'let cbs=Array.prototype.slice.call(document.querySelectorAll("#rescanTree .rtree-cb:checked"));'
                'let dirs=cbs.map(c=>c.value);ov.hidden=!0;'
-               'if(!dirs.length){Z();return}'
-               'for(let i=0;i<dirs.length;i++)await __doRescan(dirs[i])});})();'
+               'let fr=document.getElementById("rescanForce"),force=!(!fr||!fr.checked);'
+               'if(!dirs.length){await __doRescan("",force);return}'
+               'for(let i=0;i<dirs.length;i++)await __doRescan(dirs[i],force)});})();'
                # J44: 全局扫描进度轮询 —— 顶栏徽标 + 扫描结束自动刷新列表
                '(function(){if(window.__scanPoll)return;window.__scanPoll=1;let was=!1;'
                'async function tick(){let st=document.getElementById("scanStatus");if(!st)return;'
@@ -1586,7 +1718,7 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                'if(p&&p.scanning){was=!0;st.hidden=!1;'
                'let prog=(p.rootTotal>0)?((p.rootDone||0)+"/"+p.rootTotal+" \\u7ec4"):((p.dirs||0)+" \\u4e2a\\u76ee\\u5f55");'
                'let sec=Math.floor((p.elapsed||0)/1000),el=sec>=60?(Math.floor(sec/60)+"\\u5206"+(sec%60)+"\\u79d2"):(sec+"\\u79d2");'
-               'st.textContent="\\u626b\\u63cf\\u4e2d "+prog+" \\u00b7 \\u5df2\\u53d1\\u73b0 "+(p.books||0)+" \\u672c \\u00b7 "+el;'
+               'st.textContent="\\u626b\\u63cf\\u4e2d "+prog+" \\u00b7 \\u5df2\\u53d1\\u73b0 "+(p.books||0)+" \\u672c"+(p.reused?"\\uff08\\u590d\\u7528 "+p.reused+"\\uff09":"")+" \\u00b7 "+el;'
                'st.title="\\u5f53\\u524d\\u76ee\\u5f55\\uff1a"+(p.currentDir||"\\u6839\\u76ee\\u5f55")}'
                'else{if(was){was=!1;w();u("\\u626b\\u63cf\\u5b8c\\u6210")}st.hidden=!0}}'
                'setInterval(tick,3000);tick()})();')
@@ -1761,7 +1893,8 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         ".scan-pill::before { content: \"\\27f3\"; display: inline-block; margin-right: 6px; color: var(--primary);\n"
         "  animation: scan-spin 1.2s linear infinite; }\n"
         "@keyframes scan-spin { to { transform: rotate(360deg); } }\n"
-        ".scan-pill[hidden] { display: none !important; }\n")
+        ".scan-pill[hidden] { display: none !important; }\n"
+        ".rtree-force { display: block; font-size: 12px; color: var(--text-3); padding: 6px 10px; cursor: pointer; }\n")
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     print("  style.css: +mode-small/mode-list +别名/路径/设置行样式")
