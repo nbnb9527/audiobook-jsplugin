@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.22"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.23"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -82,6 +82,11 @@ def extract_source(zf: zipfile.ZipFile) -> str:
     assert src.startswith("()=>{"), "源码开头异常: %r" % src[:20]
     assert src.endswith("}"), "源码结尾异常: %r" % src[-20:]
     return src
+
+
+def _u(s: str) -> str:
+    # 中文转 \uXXXX 转义（与官方源码风格一致，避免不同环境下 jsc 处理源码的编码差异）
+    return "".join(c if ord(c) < 128 else "\\u%04x" % ord(c) for c in s)
 
 
 # ---------- 2. 打补丁 ----------
@@ -806,6 +811,58 @@ def patch_ui(src: str) -> str:
         assert src.count(p14k_old) == 1, "P14k 锚点数量异常"
         src = src.replace(p14k_old, p14k_new)
 
+    # P15: 启动/重载时的自动扫描策略
+    #   宿主自带插件自动更新机制（每天错峰触碰/重载插件），而原版初始化会无条件
+    #   scanInBackground()，于是「没点重新扫描也天天全库重扫」。改为可配置策略。
+    if not globals().get("SKIP_P15", False):
+        # 记录上次成功扫描时间（scanInBackground / rescan 各一处）
+        p15a_old = 'this.scannedAt=Date.now(),await N(n)'
+        p15a_new = ('this.scannedAt=Date.now(),this.settings.lastScanAt=Date.now(),'
+                    'await this.saveSettings(),await N(n)')
+        assert src.count(p15a_old) == 2, "P15a 锚点数量异常"
+        src = src.replace(p15a_old, p15a_new)
+
+        _L1 = _u("有声书插件：按设置跳过启动扫描")
+        _L2 = _u("有声书插件：缓存为空，启动首次扫描")
+        _L3a = _u("有声书插件：距上次扫描 ")
+        _L3b = _u(" 小时（超过阈值 ")
+        _L3c = _u(" 小时），开始扫描")
+        _L4a = _u("有声书插件：距上次扫描仅 ")
+        _L4b = _u(" 小时，按设置跳过启动扫描（阈值 ")
+        _L4c = _u(" 小时）")
+
+        # 初始化改为 __initScan()（条件扫描）
+        p15b_old = '__SHORTS_T=__SHORTS_VAL((this.settings.uiPrefs||{}).shortsMergeThreshold),this.scanInBackground()'
+        p15b_new = '__SHORTS_T=__SHORTS_VAL((this.settings.uiPrefs||{}).shortsMergeThreshold),this.__initScan()'
+        assert src.count(p15b_old) == 1, "P15b 锚点数量异常"
+        src = src.replace(p15b_old, p15b_new)
+
+        # 新增 __initScan 方法：always / stale(默认,72h) / empty / never
+        p15c_old = 'async scanInBackground(){if(this.scanning)return;'
+        p15c_new = ('async __initScan(){'
+                    'var p=(this.settings.uiPrefs||{});'
+                    'var mode=p.initScanMode||"stale";'
+                    'var hrs=Number(p.initScanStaleHours||72);'
+                    'if(mode==="never"){songloft.log.info("' + _L1 + '");return}'
+                    'if(mode==="always"){return this.scanInBackground()}'
+                    'if(!this.books.length){songloft.log.info("' + _L2 + '");return this.scanInBackground()}'
+                    'if(mode==="empty"){return}'
+                    'var last=this.settings.lastScanAt||0;'
+                    'var age=(Date.now()-last)/3600000;'
+                    'if(age>=hrs){songloft.log.info("' + _L3a + '"+age.toFixed(1)+"' + _L3b
+                    + '"+hrs+"' + _L3c + '");return this.scanInBackground()}'
+                    'songloft.log.info("' + _L4a + '"+age.toFixed(1)+"' + _L4b + '"+hrs+"' + _L4c + '")}'
+                    'async scanInBackground(){if(this.scanning)return;')
+        assert src.count(p15c_old) == 1, "P15c 锚点数量异常"
+        src = src.replace(p15c_old, p15c_new)
+
+        # scan-progress 附带 lastScanAt（前端展示“上次扫描时间”）
+        p15d_old = '{elapsed:__SCANP.scanning?Date.now()-__SCANP.startedAt:0})})),'
+        p15d_new = ('{elapsed:__SCANP.scanning?Date.now()-__SCANP.startedAt:0,'
+                    'lastScanAt:t.settings.lastScanAt||0})})),')
+        assert src.count(p15d_old) == 1, "P15d 锚点数量异常"
+        src = src.replace(p15d_old, p15d_new)
+
     return src
 
 
@@ -1038,6 +1095,31 @@ def patch_static(build_dir: str) -> None:
                '          </div>')
     html = rep(html, h13_old, h13_new, "H13")
 
+    # H17: 设置弹窗新增「自动扫描」区块 —— 插件被宿主重载时是否自动全库扫描
+    h17_old = ('            <div class="settings-pref-desc">同一分类目录下章节数不超过阈值的有声书将自动合并为一本「短篇合集」，'
+               '可显著减少书目数量（默认 ≤4 章）。保存后自动重新扫描生效；播放进度会双向迁移，不丢失。</div>\n'
+               '          </div>')
+    h17_new = (h17_old +
+               '          <div class="settings-section">\n'
+               '            <div class="settings-section-title">自动扫描</div>\n'
+               '            <div class="settings-pref-row">\n'
+               '              <label>插件重启时\n'
+               '                <select id="prefInitScan">\n'
+               '                  <option value="stale">距上次扫描超过阈值才扫（推荐）</option>\n'
+               '                  <option value="always">每次都全库扫描（原版行为）</option>\n'
+               '                  <option value="empty">仅当书库缓存为空时扫描</option>\n'
+               '                  <option value="never">从不自动扫描</option>\n'
+               '                </select>\n'
+               '              </label>\n'
+               '              <label>阈值（小时）\n'
+               '                <input type="number" id="prefInitScanHours" min="1" max="720" style="width:80px" />\n'
+               '              </label>\n'
+               '            </div>\n'
+               '            <div class="settings-pref-desc">宿主每天会自动检查并重载插件，原版每次启动都无条件全库重扫（大书库很耗时）。'
+               '保留「距上次扫描超过阈值才扫」即可避免无谓扫描；新增或移动音频后，用主页「重新扫描」按目录刷新更快。</div>\n'
+               '          </div>')
+    html = rep(html, h17_old, h17_new, "H17")
+
     # H14: 主页「加载」按钮改名「重新扫描」（点击改为弹出扫描范围选择，不再直接全库重扫）
     h14_old = '重新扫描本地目录">加载</button>'
     h14_new = '重新扫描本地目录">重新扫描</button>'
@@ -1061,6 +1143,7 @@ def patch_static(build_dir: str) -> None:
                '            <span class="rtree-caret">▾</span>\n'
                '          </div>\n'
                '          <div class="rtree" id="rescanTree"><div class="rtree-msg">加载中...</div></div>\n'
+               '          <div class="rtree-msg" id="rescanLastInfo"></div>\n'
                '        </div>\n'
                '        <div class="edit-actions">\n'
                '          <button class="btn btn-ghost" id="rescanCancelBtn" type="button">取消</button>\n'
@@ -1086,12 +1169,12 @@ def patch_static(build_dir: str) -> None:
         "function __isMobile(){return window.matchMedia&&window.matchMedia(\"(max-width:768px)\").matches}\n"
         "function __getViewMode(){let d=__isMobile()?\"viewMobile\":\"viewDesktop\";try{let v=localStorage.getItem(d===\"viewMobile\"?\"ab_view_mobile\":\"ab_view_desktop\");if(v===\"large\"||v===\"small\"||v===\"list\")return v}catch(_){}return n.uiPrefs&&n.uiPrefs[d]||\"large\"}\n"
         "function __setViewMode(v){let d=__isMobile()?\"mobile\":\"desktop\";try{localStorage.setItem(\"ab_view_\"+d,v)}catch(_){}}\n"
-        "function __syncViewModeUI(){let s=document.getElementById(\"viewMode\");s&&(s.value=__getViewMode());let pd=document.getElementById(\"prefViewDesktop\");pd&&(pd.value=n.uiPrefs&&n.uiPrefs.viewDesktop||\"large\");let pm=document.getElementById(\"prefViewMobile\");pm&&(pm.value=n.uiPrefs&&n.uiPrefs.viewMobile||\"large\");let pt=document.getElementById(\"prefShortsThreshold\");pt&&(pt.value=String(n.uiPrefs&&n.uiPrefs.shortsMergeThreshold!=null?n.uiPrefs.shortsMergeThreshold:4))}\n"
+        "function __syncViewModeUI(){let s=document.getElementById(\"viewMode\");s&&(s.value=__getViewMode());let pd=document.getElementById(\"prefViewDesktop\");pd&&(pd.value=n.uiPrefs&&n.uiPrefs.viewDesktop||\"large\");let pm=document.getElementById(\"prefViewMobile\");pm&&(pm.value=n.uiPrefs&&n.uiPrefs.viewMobile||\"large\");let pt=document.getElementById(\"prefShortsThreshold\");pt&&(pt.value=String(n.uiPrefs&&n.uiPrefs.shortsMergeThreshold!=null?n.uiPrefs.shortsMergeThreshold:4));let pi=document.getElementById(\"prefInitScan\");pi&&(pi.value=(n.uiPrefs&&n.uiPrefs.initScanMode)||\"stale\");let ph=document.getElementById(\"prefInitScanHours\");ph&&(ph.value=String(n.uiPrefs&&n.uiPrefs.initScanStaleHours!=null?n.uiPrefs.initScanStaleHours:72))}\n"
         "async function __savePrefs(p){n.uiPrefs=Object.assign({viewDesktop:\"large\",viewMobile:\"large\"},n.uiPrefs||{},p),__syncViewModeUI(),fe();try{await y(\"/api/ui-prefs\",{method:\"PUT\",body:JSON.stringify(p),headers:{\"Content-Type\":\"application/json\"}})}catch(e){u(\"\\u4FDD\\u5B58\\u663E\\u793A\\u8BBE\\u7F6E\\u5931\\u8D25\\uFF1A\"+e.message)}}\n"
         "function __relPath(p){if(!p)return\"\";let lp=String(n.libraryPath||\"/app/audiobook\").replace(/\\/+$/,\"\");return p===lp?\"\":p.indexOf(lp+\"/\")===0?p.substring(lp.length+1):p}\n"
         "async function __saveRate(id,rate){if(!id)return;n.playbackRates=n.playbackRates||{};n.playbackRates[id]=rate;try{localStorage.setItem(\"ab_rate_\"+id,String(rate))}catch(_){}try{await y(\"/api/books/\"+id+\"/rate\",{method:\"POST\",body:JSON.stringify({rate:rate}),headers:{\"Content-Type\":\"application/json\"}})}catch(_){}}\n"
         "function __restoreRate(id){if(!id)return;let v=0;try{v=parseFloat(localStorage.getItem(\"ab_rate_\"+id))}catch(_){}if(!v||isNaN(v))v=(n.playbackRates||{})[id]||0;if(!v)v=1;if([.75,1,1.25,1.5,1.75,2].indexOf(v)<0)v=1;n.speed=v;let o=document.getElementById(\"btnSpeedFull\");o&&(o.textContent=v+\"x\");let r=n.audioEl||b();r&&(r.playbackRate=v)}\n"
-        "function __initViewMode(){__syncViewModeUI();let s=document.getElementById(\"viewMode\");s&&!s.dataset.boundV&&(s.dataset.boundV=\"1\",s.addEventListener(\"change\",()=>{__setViewMode(s.value),fe()}));let pd=document.getElementById(\"prefViewDesktop\");pd&&!pd.dataset.boundV&&(pd.dataset.boundV=\"1\",pd.addEventListener(\"change\",()=>__savePrefs({viewDesktop:pd.value})));let pm=document.getElementById(\"prefViewMobile\");pm&&!pm.dataset.boundV&&(pm.dataset.boundV=\"1\",pm.addEventListener(\"change\",()=>__savePrefs({viewMobile:pm.value})));let pt=document.getElementById(\"prefShortsThreshold\");pt&&!pt.dataset.boundV&&(pt.dataset.boundV=\"1\",pt.addEventListener(\"change\",async()=>{let v=parseInt(pt.value,10)||0;await __savePrefs({shortsMergeThreshold:v});try{await y(\"/api/rescan\",{method:\"POST\"}),u(v>0?\"\\u5DF2\\u4FDD\\u5B58\\uFF0C\\u6B63\\u5728\\u91CD\\u65B0\\u626B\\u63CF\\u4EE5\\u5E94\\u7528\\u77ED\\u7BC7\\u5408\\u5E76\":\"\\u5DF2\\u5173\\u95ED\\u77ED\\u7BC7\\u5408\\u5E76\\uFF0C\\u6B63\\u5728\\u91CD\\u65B0\\u626B\\u63CF\")}catch(e){u(\"\\u91CD\\u65B0\\u626B\\u63CF\\u5931\\u8D25\\uFF1A\"+e.message)}}));let cp=document.getElementById(\"editCopyPath\");cp&&!cp.dataset.boundV&&(cp.dataset.boundV=\"1\",cp.addEventListener(\"click\",async()=>{let v=document.getElementById(\"editBookPath\").value||\"\";try{await navigator.clipboard.writeText(v),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(e){let i=document.getElementById(\"editBookPath\");i.focus(),i.select();try{document.execCommand(\"copy\"),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(_){u(\"\\u590D\\u5236\\u5931\\u8D25\\uFF0C\\u8BF7\\u624B\\u52A8\\u9009\\u62E9\\u590D\\u5236\")}}}));try{let mq=window.matchMedia(\"(max-width:768px)\"),h=()=>{__syncViewModeUI(),fe()};mq.addEventListener?mq.addEventListener(\"change\",h):mq.addListener(h)}catch(_){}}\n"
+        "function __initViewMode(){__syncViewModeUI();let s=document.getElementById(\"viewMode\");s&&!s.dataset.boundV&&(s.dataset.boundV=\"1\",s.addEventListener(\"change\",()=>{__setViewMode(s.value),fe()}));let pd=document.getElementById(\"prefViewDesktop\");pd&&!pd.dataset.boundV&&(pd.dataset.boundV=\"1\",pd.addEventListener(\"change\",()=>__savePrefs({viewDesktop:pd.value})));let pm=document.getElementById(\"prefViewMobile\");pm&&!pm.dataset.boundV&&(pm.dataset.boundV=\"1\",pm.addEventListener(\"change\",()=>__savePrefs({viewMobile:pm.value})));let pt=document.getElementById(\"prefShortsThreshold\");pt&&!pt.dataset.boundV&&(pt.dataset.boundV=\"1\",pt.addEventListener(\"change\",async()=>{let v=parseInt(pt.value,10)||0;await __savePrefs({shortsMergeThreshold:v});try{await y(\"/api/rescan\",{method:\"POST\"}),u(v>0?\"\\u5DF2\\u4FDD\\u5B58\\uFF0C\\u6B63\\u5728\\u91CD\\u65B0\\u626B\\u63CF\\u4EE5\\u5E94\\u7528\\u77ED\\u7BC7\\u5408\\u5E76\":\"\\u5DF2\\u5173\\u95ED\\u77ED\\u7BC7\\u5408\\u5E76\\uFF0C\\u6B63\\u5728\\u91CD\\u65B0\\u626B\\u63CF\")}catch(e){u(\"\\u91CD\\u65B0\\u626B\\u63CF\\u5931\\u8D25\\uFF1A\"+e.message)}}));let ip=document.getElementById(\"prefInitScan\");ip&&!ip.dataset.boundV&&(ip.dataset.boundV=\"1\",ip.addEventListener(\"change\",()=>__savePrefs({initScanMode:ip.value})));let hp=document.getElementById(\"prefInitScanHours\");hp&&!hp.dataset.boundV&&(hp.dataset.boundV=\"1\",hp.addEventListener(\"change\",()=>{let v=parseInt(hp.value,10);if(!v||v<1)v=72;hp.value=String(v);__savePrefs({initScanStaleHours:v})}));let cp=document.getElementById(\"editCopyPath\");cp&&!cp.dataset.boundV&&(cp.dataset.boundV=\"1\",cp.addEventListener(\"click\",async()=>{let v=document.getElementById(\"editBookPath\").value||\"\";try{await navigator.clipboard.writeText(v),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(e){let i=document.getElementById(\"editBookPath\");i.focus(),i.select();try{document.execCommand(\"copy\"),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(_){u(\"\\u590D\\u5236\\u5931\\u8D25\\uFF0C\\u8BF7\\u624B\\u52A8\\u9009\\u62E9\\u590D\\u5236\")}}}));try{let mq=window.matchMedia(\"(max-width:768px)\"),h=()=>{__syncViewModeUI(),fe()};mq.addEventListener?mq.addEventListener(\"change\",h):mq.addListener(h)}catch(_){}}\n"
         "function fe(){let e=document.getElementById(\"bookGrid\");if(e){"
         "e.classList.remove(\"mode-small\",\"mode-list\");"
         "let __vm=__getViewMode();__vm!==\"large\"&&e.classList.add(\"mode-\"+__vm);"
@@ -1459,11 +1542,17 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                'row.appendChild(caret)}'
                'row.style.paddingLeft=(8+depth*18)+"px";'
                'return row}'
+               'function __fmtAgo(ts){let d=Date.now()-ts;if(d<0)d=0;let m=Math.floor(d/60000);'
+               'if(m<1)return"\\u521a\\u521a";if(m<60)return m+"\\u5206\\u949f\\u524d";'
+               'let h=Math.floor(m/60);if(h<24)return h+"\\u5c0f\\u65f6\\u524d";'
+               'return Math.floor(h/24)+"\\u5929\\u524d"}'
                'async function __openRescanModal(){'
                'let o=document.getElementById("rescanOverlay");if(!o)return;'
                'let tr=document.getElementById("rescanTree");'
                'tr.innerHTML=\'<div class="rtree-msg">\\u52a0\\u8f7d\\u4e2d...</div>\';'
                'o.hidden=!1;'
+               '(async()=>{try{let pg=await y("/api/scan-progress");let li=document.getElementById("rescanLastInfo");'
+               'if(li){li.textContent=pg.lastScanAt?("\\u4e0a\\u6b21\\u5168\\u5e93\\u626b\\u63cf\\uff1a"+__fmtAgo(pg.lastScanAt)):"\\u5c1a\\u672a\\u8fdb\\u884c\\u8fc7\\u5168\\u5e93\\u626b\\u63cf"}}catch(_){}})();'
                'try{let d=await y("/api/list-dir");let arr=(d&&d.dirs)||[];'
                'tr.innerHTML="";'
                'if(!arr.length){tr.innerHTML=\'<div class="rtree-msg">\\u4e66\\u5e93\\u6839\\u76ee\\u5f55\\u4e0b\\u6ca1\\u6709\\u5b50\\u76ee\\u5f55</div>\';return}'
