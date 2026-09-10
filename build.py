@@ -2369,8 +2369,10 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
     # v1.3.35：favoritesOnly 复选框已从 HTML 移除（筛选下拉的「收藏」替代），
     # 原绑定无空值保护会抛错断链，改为安全绑定。
     jg4a_old = 'document.getElementById("favoritesOnly").addEventListener("change",()=>{n.page=1,w()}),'
-    jg4a_new = ('var __fo=document.getElementById("favoritesOnly");'
-                '__fo&&__fo.addEventListener("change",()=>{n.page=1,w()}),'
+    # 注意：此处处于逗号表达式链 A(),B(),C() 中间，只能插入「表达式」，不能出现
+    # var/let/const 等语句，否则 SyntaxError: Unexpected token 'var'（v1.3.36 修复）。
+    jg4a_new = ('(__fo=document.getElementById("favoritesOnly"))'
+                '&&__fo.addEventListener("change",()=>{n.page=1,w()}),'
                 'document.getElementById("viewMode").addEventListener("change",'
                 '()=>{let v=document.getElementById("viewMode").value||"large";__setViewMode(v),fe()}),'
                 'function(){try{__syncViewModeUI()}catch(_){}}(),')
@@ -2782,6 +2784,14 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
     js = rep(js, j37_old, j37_new, "J37")
 
     open(js_path, "w", encoding="utf-8", newline="").write(js)
+    # 前端语法自检：minified 单行 bundle 里的语法错误（如逗号表达式中插入 var 语句）
+    # 必须在构建阶段拦下，否则只在浏览器运行时静默抛 SyntaxError、整个前端不工作。
+    import subprocess as _sp
+    import shutil as _shutil
+    _node = _shutil.which("node") or r"C:\Users\Administrator\.workbuddy\binaries\node\versions\22.22.2-2\node.exe"
+    _chk = _sp.run([_node, "--check", js_path], capture_output=True)
+    if _chk.returncode != 0:
+        raise AssertionError("app.bundle 前端语法检查失败:\n" + _chk.stderr.decode("utf-8", "replace")[:2000])
     print("  app.bundle: +显示方式/顺序/别名/路径复制/播放速度记忆 接线")
 
     # ===== style.*.css =====
