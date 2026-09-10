@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.25"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.26"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -161,21 +161,9 @@ def patch(src: str) -> str:
     #   目录有子目录 -> 下钻；其散落音频归入 "<目录名>-未分类" 一本书
     #   纯容器目录 -> 继续下钻（Justing 多层素材库按叶子目录成书）
     # 散落音频书：id 基于相对路径（多本未分类互不冲突），章节 16 并发 stat。
-    a5 = "async function gt(s,t){"
-    assert src.count(a5) == 1, "P5a 锚点数量异常"
-    src = src.replace(a5, "async function gt(s,t,__K){")
-
-    a5b = "book:{id:R(t),title:t,"
-    assert src.count(a5b) == 1, "P5b 锚点数量异常"
-    src = src.replace(a5b, "book:{id:R(__K||t),title:t,")
-
-    a5c = ("for(let r of o)try{let a=await gt(s,r);"
-           "a&&a.chapters.length>0&&(t.books.push(a.book),"
-           "t.chaptersByBookId[a.book.id]=a.chapters)}"
-           "catch(a){songloft.log.warn(`\\u626B\\u63CF\\u6587\\u4EF6\\u5939 '${r}' "
-           "\\u5931\\u8D25: ${String(a)}`)}")
-    assert src.count(a5c) == 1, "P5c 锚点数量异常"
-    p5c_new = (
+    # __U/__D 必须定义在模块级：__rescanDir（指定目录重扫）也要调用 __D。
+    # 原实现把两者塞在 _() 内部，目录重扫会抛 "__D is not defined" 而静默失败。
+    P5_TOP = (
         # __U: 把目录根下的散落音频构造成 "<目录名>-未分类" 书
         "async function __U(s,rel,auds,t){if(auds.length===0)return;"
         "let dir=s+\"/\"+rel;auds.sort((a,b)=>$(a,b));"
@@ -220,6 +208,22 @@ def patch(src: str) -> str:
         "\\u5931\\u8D25: ${String(e)}`)}return}"
         "for(let x of subs)await __D(s,rel+\"/\"+x,t,IG,d+1);"
         "await __U(s,rel,auds,t)}"
+    )
+    a5 = "async function gt(s,t){"
+    assert src.count(a5) == 1, "P5a 锚点数量异常"
+    src = src.replace(a5, P5_TOP + "async function gt(s,t,__K){")
+
+    a5b = "book:{id:R(t),title:t,"
+    assert src.count(a5b) == 1, "P5b 锚点数量异常"
+    src = src.replace(a5b, "book:{id:R(__K||t),title:t,")
+
+    a5c = ("for(let r of o)try{let a=await gt(s,r);"
+           "a&&a.chapters.length>0&&(t.books.push(a.book),"
+           "t.chaptersByBookId[a.book.id]=a.chapters)}"
+           "catch(a){songloft.log.warn(`\\u626B\\u63CF\\u6587\\u4EF6\\u5939 '${r}' "
+           "\\u5931\\u8D25: ${String(a)}`)}")
+    assert src.count(a5c) == 1, "P5c 锚点数量异常"
+    p5c_new = (
         # 顶层：所有目录统一走 __D（.scandeep 机制废除，默认生效）
         "for(let r of o)try{await __D(s,r,t,__IGN,0)}"
         "catch(a){songloft.log.warn(`\\u626B\\u63CF\\u6587\\u4EF6\\u5939 '${r}' "
@@ -376,13 +380,13 @@ def patch_ui(src: str) -> str:
     # P8g: 未分类合集（__U 生成的 "<目录名>-未分类" 书）标记 isMisc，
     #      前端隐藏删除按钮、后端路由拒绝删除（其 folderRelPath 是父分类目录，删了会误删整层）
     p8g_old = "folderRelPath:dir};"
-    p8g_new = "folderRelPath:dir,isMisc:!0};"
+    p8g_new = "folderRelPath:dir,isMisc:!0,virt:\"misc\"};"
     assert src.count(p8g_old) == 1, "P8g 锚点数量异常"
     src = src.replace(p8g_old, p8g_new)
 
     # P8g2: 书库根目录下的“未分类音频”书（ut 生成，folderRelPath=书库根）同样标记 isMisc
     p8g2_old = "chapterCount:n.length,totalSize:e,folderRelPath:s}"
-    p8g2_new = "chapterCount:n.length,totalSize:e,folderRelPath:s,isMisc:!0}"
+    p8g2_new = "chapterCount:n.length,totalSize:e,folderRelPath:s,isMisc:!0,virt:\"misc\"}"
     assert src.count(p8g2_old) == 1, "P8g2 锚点数量异常"
     src = src.replace(p8g2_old, p8g2_new)
 
@@ -569,11 +573,21 @@ def patch_ui(src: str) -> str:
         p11a_new = ('var __SHORTS_T=4;'
                     'function __SHORTS_VAL(v){return v==null?4:Number(v)||0}'
                     'function __SHORTS_MERGE(t){'
-                    'var T=__SHORTS_T;if(!(T>=1))return;'
-                    'var groups={},rem={};'
+                    'var T=__SHORTS_T;'
+                    # v1.3.26 复位：先恢复所有子书可见、移除上一轮短篇合集，再按当前
+                    # 阈值重新合并 —— 幂等（不会重复 id），且改阈值后任意一次扫描/
+                    # 重建即生效。子书不再从库中删除，只打 hidden 标记，后续「打散」
+                    # 才能还原出子书。
+                    'for(var i0=0;i0<t.books.length;i0++){var b0=t.books[i0];'
+                    'if(b0.mergedInto){b0.mergedInto="";b0.hidden=!1}}'
+                    'var nb0=[];for(var i1=0;i1<t.books.length;i1++)'
+                    'if(t.books[i1].virt!=="shorts")nb0.push(t.books[i1]);'
+                    't.books=nb0;'
+                    'if(!(T>=1))return;'
+                    'var groups={};'
                     'for(var i=0;i<t.books.length;i++){'
                     'var b=t.books[i];'
-                    'if(b.isMisc)continue;'
+                    'if(b.isMisc||b.virt||b.hidden)continue;'
                     'if((b.chapterCount||0)>T)continue;'
                     'var p=b.folderRelPath||"",ix=p.lastIndexOf("/");'
                     'if(ix<=0)continue;'
@@ -583,9 +597,9 @@ def patch_ui(src: str) -> str:
                     'for(var par in groups){'
                     'var subs=groups[par];if(!subs.length)continue;'
                     'subs.sort(function(a,b){return $(a.folderRelPath,b.folderRelPath)});'
-                    'var cs=[],size=0,upd=0,cover=null,cat="",tags={},names=[];'
+                    'var cs=[],size=0,upd=0,cover=null,cat="",tags={},names=[],mids=[];'
                     'for(var j=0;j<subs.length;j++){'
-                    'var b2=subs[j];rem[b2.id]=1;'
+                    'var b2=subs[j];mids.push(b2.id);'
                     'var chs=(t.chaptersByBookId[b2.id]||[]).slice();'
                     'chs.sort(function(a,c){return $(a.fileRelPath,c.fileRelPath)});'
                     'for(var m=0;m<chs.length;m++){'
@@ -599,15 +613,15 @@ def patch_ui(src: str) -> str:
                     'var tg=b2.tags||[];for(var q=0;q<tg.length;q++)tags[tg[q]]=1}'
                     'for(var k2=0;k2<cs.length;k2++)cs[k2].index=k2+1;'
                     'var pi=par.lastIndexOf("/"),pn=par.substring(pi+1);'
-                    'var mb={id:R(par+"/__shorts__"),title:pn+"-\\u77ed\\u7bc7\\u5408\\u96c6",author:"\\u5408\\u96c6",coverUrl:cover,coverRatio:"",'
+                    'var mb={id:R(par+"/__shorts__"),virt:"shorts",memberIds:mids,'
+                    'title:pn+"-\\u77ed\\u7bc7\\u5408\\u96c6",author:"\\u5408\\u96c6",coverUrl:cover,coverRatio:"",'
                     'description:"\\u7531 "+subs.length+" \\u672c\\u77ed\\u7bc7\\u6709\\u58f0\\u4e66\\u5408\\u5e76\\uff1a"+names.join("\\u3001"),'
                     'category:cat||"\\u9ed8\\u8ba4",tags:Object.keys(tags),updatedAt:upd||Date.now(),chapterCount:cs.length,totalSize:size,folderRelPath:par,isMisc:!0};'
-                    't.books.push(mb);'
+                    'var ex=-1;for(var z2=0;z2<t.books.length;z2++)if(t.books[z2].id===mb.id){ex=z2;break}'
+                    'if(ex>=0)t.books[ex]=mb;else t.books.push(mb);'
                     't.chaptersByBookId[mb.id]=cs;'
-                    'songloft.log.info("\\u77ed\\u7bc7\\u5408\\u5e76\\uff1a"+pn+" \\u5408\\u5e76 "+subs.length+" \\u672c / "+cs.length+" \\u7ae0")}'
-                    'if(Object.keys(rem).length){'
-                    'var nb=[];for(var z=0;z<t.books.length;z++)if(!rem[t.books[z].id])nb.push(t.books[z]);'
-                    't.books=nb}}'
+                    'for(var j3=0;j3<subs.length;j3++){subs[j3].mergedInto=mb.id,subs[j3].hidden=!0}'
+                    'songloft.log.info("\\u77ed\\u7bc7\\u5408\\u5e76\\uff1a"+pn+" \\u5408\\u5e76 "+subs.length+" \\u672c / "+cs.length+" \\u7ae0")}}'
                     + p11a_old)
         assert src.count(p11a_old) == 1, "P11a 锚点数量异常"
         src = src.replace(p11a_old, p11a_new)
@@ -660,7 +674,7 @@ def patch_ui(src: str) -> str:
         p12a_old = 'async rescan(){__SHORTS_T=__SHORTS_VAL((this.settings.uiPrefs||{}).shortsMergeThreshold),++this.generation'
         p12a_new = ('async __rescanDir(dir){'
                     'if(this.scanning)throw new Error("\\u626b\\u63cf\\u8fdb\\u884c\\u4e2d\\uff0c\\u8bf7\\u7a0d\\u540e\\u518d\\u8bd5");'
-                    'dir=String(dir||"").replace(/\\\\/g,"/").replace(/^\\/+|\\/+$/g,"");'
+                    'dir=String(dir||"").replace(/\\\\/g,"/").replace(/^\\/+|\\/+$/g,"");var __mp=M.replace(/^\\/+/,"");if(dir.indexOf(__mp+"/")===0)dir=dir.slice(__mp.length+1);else if(dir===__mp)dir="";'
                     'if(!dir||dir.indexOf("..")>=0)throw new Error("\\u65e0\\u6548\\u76ee\\u5f55");'
                     'var full=M+"/"+dir;'
                     'try{await songloft.fs.stat(full)}catch(e){throw new Error("\\u76ee\\u5f55\\u4e0d\\u5b58\\u5728: "+dir)}'
@@ -992,7 +1006,107 @@ def patch_ui(src: str) -> str:
         assert src.count(p16i_old) == 1, "P16i 锚点数量异常"
         src = src.replace(p16i_old, p16i_new)
 
+    # P17: 短篇合集可重建（v1.3.26）
+    #   1) 合并后子书只打 hidden/mergedInto、不再从库中删除 —— 于是：
+    #      a. 任意一次扫描/重建都能按当前阈值重算（改阈值即时生效，无需强制全量）
+    #      b. 「重建合集」无需读盘（纯内存重跑合并，秒级完成）
+    #      c. 后续「打散合集」能还原出子书
+    #   2) list()/分类/标签/书数 一律过滤 hidden，UI 表现与旧版一致
+    #   3) 目录重扫时丢弃扫描范围内的虚拟书（virt），交给扫描/合并重新生成
+    if not globals().get("SKIP_P17", False):
+        # p17a: list() 过滤 hidden
+        p17a_old = 'a=this.books.slice();'
+        p17a_new = 'a=this.books.filter(function(b){return !b.hidden}).slice();'
+        assert src.count(p17a_old) == 1, "P17a 锚点数量异常"
+        src = src.replace(p17a_old, p17a_new)
+
+        # p17b: 快照书数同样排除被合并掉的子书
+        p17b_old = 'getSnapshot(){return{books:this.books,totalBooks:this.books.length,'
+        p17b_new = ('getSnapshot(){var __vb=this.books.filter(function(b){return !b.hidden});'
+                    'return{books:__vb,totalBooks:__vb.length,')
+        assert src.count(p17b_old) == 1, "P17b 锚点数量异常"
+        src = src.replace(p17b_old, p17b_new)
+
+        p17c_old = 'for(let n of this.books)t.add(n.category);'
+        p17c_new = 'for(let n of this.books){if(n.hidden)continue;t.add(n.category)}'
+        assert src.count(p17c_old) == 1, "P17c 锚点数量异常"
+        src = src.replace(p17c_old, p17c_new)
+
+        p17d_old = 'for(let n of this.books)for(let o of n.tags||[])t.add(o);'
+        p17d_new = 'for(let n of this.books){if(n.hidden)continue;for(let o of n.tags||[])t.add(o)}'
+        assert src.count(p17d_old) == 1, "P17d 锚点数量异常"
+        src = src.replace(p17d_old, p17d_new)
+
+        # p17e: 目录重扫 —— 扫描范围内的虚拟书（短篇/未分类合集）先丢弃，
+        #       由本次扫描 + 收尾合并重新生成，避免新旧两份同 id 记录并存
+        p17e_old = ('var kept=base.books.filter(function(b){'
+                    'return !(b.folderRelPath&&b.folderRelPath.indexOf(prefix)===0)});')
+        p17e_new = ('var kept=base.books.filter(function(b){var bp=b.folderRelPath||"";'
+                    'if(b.virt&&(bp===full||bp.indexOf(prefix)===0))return !1;'
+                    'return !(bp&&bp.indexOf(prefix)===0)});')
+        assert src.count(p17e_old) == 1, "P17e 锚点数量异常"
+        src = src.replace(p17e_old, p17e_new)
+
+        # p17f: __remerge —— 不读盘，直接在现有书库上按当前阈值重跑短篇合并
+        p17f_old = 'async __rescanDir(dir){'
+        p17f_new = ('async __remerge(){'
+                    'if(this.scanning)throw new Error('
+                    '"\\u626b\\u63cf\\u8fdb\\u884c\\u4e2d\\uff0c\\u8bf7\\u7a0d\\u540e\\u518d\\u8bd5");'
+                    'var base=await G();'
+                    'if(!base||!base.books||!base.books.length)'
+                    'throw new Error("\\u4e66\\u5e93\\u4e3a\\u7a7a\\uff0c\\u8bf7\\u5148\\u626b\\u63cf");'
+                    '__SHORTS_T=__SHORTS_VAL((this.settings.uiPrefs||{}).shortsMergeThreshold);'
+                    '__SHORTS_MERGE(base);'
+                    'this.books=base.books;this.chaptersByBookId=base.chaptersByBookId;'
+                    'this.scannedAt=Date.now();'
+                    'await N(base);await this.__migShorts(base);'
+                    'var c=0;for(var i=0;i<base.books.length;i++)'
+                    'if(base.books[i].virt==="shorts")c++;'
+                    'return c}'
+                    + p17f_old)
+        assert src.count(p17f_old) == 1, "P17f 锚点数量异常"
+        src = src.replace(p17f_old, p17f_new)
+
+        # p17g: /api/rescan 支持 {remerge:1}
+        p17g_old = '__SH_FORCE=(d&&d.force)?1:0;if(d&&d.dir){'
+        p17g_new = ('__SH_FORCE=(d&&d.force)?1:0;'
+                    'if(d&&d.remerge){'
+                    't.__remerge().then(function(c){'
+                    'songloft.log.info("\\u91cd\\u5efa\\u5408\\u96c6\\u5b8c\\u6210\\uff0c'
+                    '\\u77ed\\u7bc7\\u5408\\u96c6 "+c+" \\u4e2a")})'
+                    '.catch(function(x){'
+                    'songloft.log.warn("\\u91cd\\u5efa\\u5408\\u96c6\\u5f02\\u5e38: "+String(x))});'
+                    'return f({success:!0,data:{remerge:!0}})}'
+                    'if(d&&d.dir){')
+        assert src.count(p17g_old) == 1, "P17g 锚点数量异常"
+        src = src.replace(p17g_old, p17g_new)
+
+        # p17h: 扫描错误诊断（目录重扫曾因 __D 作用域问题静默失败）
+        #   注意：__SCANP 声明在 P14 注入、P16 又整体替换，故这里不再改声明，
+        #   改为在扫描开始时动态挂载 __SCANP.lastError（JS 对象可动态加属性）。
+        p17i_old = '__SCANP.rootTotal=0,__SCANP.rootDone=0,__SCANP.dirs=0,__SCANP.books=0,__SCANP.currentDir=dir;'
+        p17i_new = ('__SCANP.rootTotal=0,__SCANP.rootDone=0,__SCANP.dirs=0,__SCANP.books=0,'
+                    '__SCANP.currentDir=dir,__SCANP.lastError=\"\";')
+        assert src.count(p17i_old) == 1, "P17i 锚点数量异常"
+        src = src.replace(p17i_old, p17i_new)
+
+        p17j_old = '.catch(x=>songloft.log.warn('
+        p17j_new = '.catch(x=>{__SCANP.lastError=String(x);songloft.log.warn('
+        assert src.count(p17j_old) == 1, "P17j 锚点数量异常"
+        src = src.replace(p17j_old, p17j_new)
+
+        p17k_old = '+String(x)));'
+        p17k_new = '+String(x))});'
+        assert src.count(p17k_old) == 1, "P17k 锚点数量异常"
+        src = src.replace(p17k_old, p17k_new)
+
+        p17l_old = 'lastScanAt:t.settings.lastScanAt||0,reused:__SH_REUSE||0,'
+        p17l_new = 'lastScanAt:t.settings.lastScanAt||0,lastError:__SCANP.lastError||"",reused:__SH_REUSE||0,'
+        assert src.count(p17l_old) == 1, "P17l 锚点数量异常"
+        src = src.replace(p17l_old, p17l_new)
+
     return src
+
 
 
 # ---------- 2.6 前端 static UI 补丁 ----------
@@ -1220,13 +1334,13 @@ def patch_static(build_dir: str) -> None:
                '                </select>\n'
                '              </label>\n'
                '            </div>\n'
-               '            <div class="settings-pref-desc">同一分类目录下章节数不超过阈值的有声书将自动合并为一本「短篇合集」，可显著减少书目数量（默认 ≤4 章）。保存后自动重新扫描生效；播放进度会双向迁移，不丢失。</div>\n'
+               '            <div class="settings-pref-desc">同一分类目录下章节数不超过阈值的有声书将自动合并为一本「短篇合集」，可显著减少书目数量（默认 ≤4 章）。修改后不会自动重新扫描：用主页「重新扫描」→「仅重建合集」即可按新阈值即时重算（不读盘，秒级）。播放进度会双向迁移，不丢失。</div>\n'
                '          </div>')
     html = rep(html, h13_old, h13_new, "H13")
 
     # H17: 设置弹窗新增「自动扫描」区块 —— 插件被宿主重载时是否自动全库扫描
     h17_old = ('            <div class="settings-pref-desc">同一分类目录下章节数不超过阈值的有声书将自动合并为一本「短篇合集」，'
-               '可显著减少书目数量（默认 ≤4 章）。保存后自动重新扫描生效；播放进度会双向迁移，不丢失。</div>\n'
+               '可显著减少书目数量（默认 ≤4 章）。修改后不会自动重新扫描：用主页「重新扫描」→「仅重建合集」即可按新阈值即时重算（不读盘，秒级）。播放进度会双向迁移，不丢失。</div>\n'
                '          </div>')
     h17_new = (h17_old +
                '          <div class="settings-section">\n'
@@ -1273,7 +1387,11 @@ def patch_static(build_dir: str) -> None:
                '          </div>\n'
                '          <div class="rtree" id="rescanTree"><div class="rtree-msg">加载中...</div></div>\n'
                '          <div class="rtree-msg" id="rescanLastInfo"></div>\n'
-               '          <label class="rtree-force"><input type="checkbox" id="rescanForce" /> 忽略缓存，强制全量扫描（默认增量：只重扫有变动的目录，快很多）</label>\n'
+               '          <div class="rtree-modes">\n'
+               '            <label class="rtree-force"><input type="radio" name="rescanMode" value="auto" checked /> 增量扫描（默认：只重扫有变动的目录，最快）</label>\n'
+               '            <label class="rtree-force"><input type="radio" name="rescanMode" value="remerge" /> 仅重建合集（不读盘，按当前阈值重新生成短篇合集，秒级完成）</label>\n'
+               '            <label class="rtree-force"><input type="radio" name="rescanMode" value="force" /> 忽略缓存，强制全量扫描（音频被替换但文件名没变时用）</label>\n'
+               '          </div>\n'
                '        </div>\n'
                '        <div class="edit-actions">\n'
                '          <button class="btn btn-ghost" id="rescanCancelBtn" type="button">取消</button>\n'
@@ -1299,12 +1417,21 @@ def patch_static(build_dir: str) -> None:
         "function __isMobile(){return window.matchMedia&&window.matchMedia(\"(max-width:768px)\").matches}\n"
         "function __getViewMode(){let d=__isMobile()?\"viewMobile\":\"viewDesktop\";try{let v=localStorage.getItem(d===\"viewMobile\"?\"ab_view_mobile\":\"ab_view_desktop\");if(v===\"large\"||v===\"small\"||v===\"list\")return v}catch(_){}return n.uiPrefs&&n.uiPrefs[d]||\"large\"}\n"
         "function __setViewMode(v){let d=__isMobile()?\"mobile\":\"desktop\";try{localStorage.setItem(\"ab_view_\"+d,v)}catch(_){}}\n"
-        "function __syncViewModeUI(){let s=document.getElementById(\"viewMode\");s&&(s.value=__getViewMode());let pd=document.getElementById(\"prefViewDesktop\");pd&&(pd.value=n.uiPrefs&&n.uiPrefs.viewDesktop||\"large\");let pm=document.getElementById(\"prefViewMobile\");pm&&(pm.value=n.uiPrefs&&n.uiPrefs.viewMobile||\"large\");let pt=document.getElementById(\"prefShortsThreshold\");pt&&(pt.value=String(n.uiPrefs&&n.uiPrefs.shortsMergeThreshold!=null?n.uiPrefs.shortsMergeThreshold:4));let pi=document.getElementById(\"prefInitScan\");pi&&(pi.value=(n.uiPrefs&&n.uiPrefs.initScanMode)||\"stale\");let ph=document.getElementById(\"prefInitScanHours\");ph&&(ph.value=String(n.uiPrefs&&n.uiPrefs.initScanStaleHours!=null?n.uiPrefs.initScanStaleHours:72))}\n"
-        "async function __savePrefs(p){n.uiPrefs=Object.assign({viewDesktop:\"large\",viewMobile:\"large\"},n.uiPrefs||{},p),__syncViewModeUI(),fe();try{await y(\"/api/ui-prefs\",{method:\"PUT\",body:JSON.stringify(p),headers:{\"Content-Type\":\"application/json\"}})}catch(e){u(\"\\u4FDD\\u5B58\\u663E\\u793A\\u8BBE\\u7F6E\\u5931\\u8D25\\uFF1A\"+e.message)}}\n"
-        "function __relPath(p){if(!p)return\"\";let lp=String(n.libraryPath||\"/app/audiobook\").replace(/\\/+$/,\"\");return p===lp?\"\":p.indexOf(lp+\"/\")===0?p.substring(lp.length+1):p}\n"
-        "async function __saveRate(id,rate){if(!id)return;n.playbackRates=n.playbackRates||{};n.playbackRates[id]=rate;try{localStorage.setItem(\"ab_rate_\"+id,String(rate))}catch(_){}try{await y(\"/api/books/\"+id+\"/rate\",{method:\"POST\",body:JSON.stringify({rate:rate}),headers:{\"Content-Type\":\"application/json\"}})}catch(_){}}\n"
-        "function __restoreRate(id){if(!id)return;let v=0;try{v=parseFloat(localStorage.getItem(\"ab_rate_\"+id))}catch(_){}if(!v||isNaN(v))v=(n.playbackRates||{})[id]||0;if(!v)v=1;if([.75,1,1.25,1.5,1.75,2].indexOf(v)<0)v=1;n.speed=v;let o=document.getElementById(\"btnSpeedFull\");o&&(o.textContent=v+\"x\");let r=n.audioEl||b();r&&(r.playbackRate=v)}\n"
-        "function __initViewMode(){__syncViewModeUI();let s=document.getElementById(\"viewMode\");s&&!s.dataset.boundV&&(s.dataset.boundV=\"1\",s.addEventListener(\"change\",()=>{__setViewMode(s.value),fe()}));let pd=document.getElementById(\"prefViewDesktop\");pd&&!pd.dataset.boundV&&(pd.dataset.boundV=\"1\",pd.addEventListener(\"change\",()=>__savePrefs({viewDesktop:pd.value})));let pm=document.getElementById(\"prefViewMobile\");pm&&!pm.dataset.boundV&&(pm.dataset.boundV=\"1\",pm.addEventListener(\"change\",()=>__savePrefs({viewMobile:pm.value})));let pt=document.getElementById(\"prefShortsThreshold\");pt&&!pt.dataset.boundV&&(pt.dataset.boundV=\"1\",pt.addEventListener(\"change\",async()=>{let v=parseInt(pt.value,10)||0;await __savePrefs({shortsMergeThreshold:v});try{await y(\"/api/rescan\",{method:\"POST\"}),u(v>0?\"\\u5DF2\\u4FDD\\u5B58\\uFF0C\\u6B63\\u5728\\u91CD\\u65B0\\u626B\\u63CF\\u4EE5\\u5E94\\u7528\\u77ED\\u7BC7\\u5408\\u5E76\":\"\\u5DF2\\u5173\\u95ED\\u77ED\\u7BC7\\u5408\\u5E76\\uFF0C\\u6B63\\u5728\\u91CD\\u65B0\\u626B\\u63CF\")}catch(e){u(\"\\u91CD\\u65B0\\u626B\\u63CF\\u5931\\u8D25\\uFF1A\"+e.message)}}));let ip=document.getElementById(\"prefInitScan\");ip&&!ip.dataset.boundV&&(ip.dataset.boundV=\"1\",ip.addEventListener(\"change\",()=>__savePrefs({initScanMode:ip.value})));let hp=document.getElementById(\"prefInitScanHours\");hp&&!hp.dataset.boundV&&(hp.dataset.boundV=\"1\",hp.addEventListener(\"change\",()=>{let v=parseInt(hp.value,10);if(!v||v<1)v=72;hp.value=String(v);__savePrefs({initScanStaleHours:v})}));let cp=document.getElementById(\"editCopyPath\");cp&&!cp.dataset.boundV&&(cp.dataset.boundV=\"1\",cp.addEventListener(\"click\",async()=>{let v=document.getElementById(\"editBookPath\").value||\"\";try{await navigator.clipboard.writeText(v),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(e){let i=document.getElementById(\"editBookPath\");i.focus(),i.select();try{document.execCommand(\"copy\"),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(_){u(\"\\u590D\\u5236\\u5931\\u8D25\\uFF0C\\u8BF7\\u624B\\u52A8\\u9009\\u62E9\\u590D\\u5236\")}}}));try{let mq=window.matchMedia(\"(max-width:768px)\"),h=()=>{__syncViewModeUI(),fe()};mq.addEventListener?mq.addEventListener(\"change\",h):mq.addListener(h)}catch(_){}}\n"
+        "function __syncViewModeUI(){let s=document.getElementById(\"viewMode\");s&&(s.value=__getViewMode());let pd=document.getElementById(\"prefViewDesktop\");pd&&(pd.value=n.uiPrefs&&n.uiPrefs.viewDesktop||\"large\");let pm=document.getElementById(\"prefViewMobile\");pm&&(pm.value=n.uiPrefs&&n.uiPrefs.viewMobile||\"large\");let pt=document.getElementById(\"prefShortsThreshold\");pt&&!pt.dataset.boundV&&(pt.dataset.boundV=\"1\",pt.addEventListener(\"change\",async()=>{let v=parseInt(pt.value,10)||0;await __savePrefs({shortsMergeThreshold:v});u(v>0?\"\\u5DF2\\u4FDD\\u5B58\\uFF1A\\u9608\\u503C \\u2264\"+v+\" \\u7AE0\\u3002\\u4E0D\\u4F1A\\u81EA\\u52A8\\u626B\\u63CF\\uFF0C\\u70B9\\u300C\\u91CD\\u65B0\\u626B\\u63CF\\u300D\\u5E76\\u9009\\u300C\\u4EC5\\u91CD\\u5EFA\\u5408\\u96C6\\u300D\\u5373\\u53EF\\u751F\\u6548\":\"\\u5DF2\\u5173\\u95ED\\u77ED\\u7BC7\\u5408\\u5E76\\uFF0C\\u70B9\\u300C\\u91CD\\u65B0\\u626B\\u63CF\\u300D\\u5E76\\u9009\\u300C\\u4EC5\\u91CD\\u5EFA\\u5408\\u96C6\\u300D\\u5373\\u53EF\\u89E3\\u6563\\u73B0\\u6709\\u5408\\u96C6\")}));let ip=document.getElementById(\"prefInitScan\");ip&&!ip.dataset.boundV&&(ip.dataset.boundV=\"1\",ip.addEventListener(\"change\",()=>__savePrefs({initScanMode:ip.value})));let hp=document.getElementById(\"prefInitScanHours\");hp&&!hp.dataset.boundV&&(hp.dataset.boundV=\"1\",hp.addEventListener(\"change\",()=>{let v=parseInt(hp.value,10);if(!v||v<1)v=72;hp.value=String(v);__savePrefs({initScanStaleHours:v})}));let cp=document.getElementById(\"editCopyPath\");cp&&!cp.dataset.boundV&&(cp.dataset.boundV=\"1\",cp.addEventListener(\"click\",async()=>{let v=document.getElementById(\"editBookPath\").value||\"\";try{await navigator.clipboard.writeText(v),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(e){let i=document.getElementById(\"editBookPath\");i.focus(),i.select();try{document.execCommand(\"copy\"),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(_){u(\"\\u590D\\u5236\\u5931\\u8D25\\uFF0C\\u8BF7\\u624B\\u52A8\\u9009\\u62E9\\u590D\\u5236\")}}}));try{let mq=window.matchMedia(\"(max-width:768px)\"),h=()=>{__syncViewModeUI(),fe()};mq.addEventListener?mq.addEventListener(\"change\",h):mq.addListener(h)}catch(_){}}\n"
+        "async function __rescanBook(bk){if(!bk)return;let rel=__relPath(bk.folderRelPath);"
+        "if(!rel){u(\"\\u8BE5\\u4E66\\u4F4D\\u4E8E\\u4E66\\u5E93\\u6839\\u76EE\\u5F55\\uFF0C"
+        "\\u8BF7\\u7528\\u4E3B\\u9875\\u300C\\u91CD\\u65B0\\u626B\\u63CF\\u300D\\u626B\\u63CF\\u6574\\u4E2A\\u4E66\\u5E93\");return}"
+        "try{await y(\"/api/rescan\",{method:\"POST\",body:JSON.stringify({dir:rel,force:1}),"
+        "headers:{\"Content-Type\":\"application/json\"}})}"
+        "catch(e){u(\"\\u542F\\u52A8\\u626B\\u63CF\\u5931\\u8D25\\uFF1A\"+e.message);return}"
+        "u(\"\\u5DF2\\u5F00\\u59CB\\u91CD\\u65B0\\u626B\\u63CF\\uFF1A\"+rel);"
+        "let k=0,iv=setInterval(async()=>{k++;"
+        "try{let st=await y(\"/api/scan-progress\");"
+        "if(st.lastError){clearInterval(iv);u(\"\\u626B\\u63CF\\u5931\\u8D25\\uFF1A\"+st.lastError);return}"
+        "if(!st.scanning||k>240){clearInterval(iv);"
+        "try{await w()}catch(_){}"
+        "try{await R(bk.id)}catch(_){}"
+        "u(\"\\u626B\\u63CF\\u5B8C\\u6210\")}}catch(e){}},2000)}\n"
         "function fe(){let e=document.getElementById(\"bookGrid\");if(e){"
         "e.classList.remove(\"mode-small\",\"mode-list\");"
         "let __vm=__getViewMode();__vm!==\"large\"&&e.classList.add(\"mode-\"+__vm);"
@@ -1559,6 +1686,20 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                '          <button class="btn btn-ghost" id="btnToggleFav">${e.isFavorite?"\\u2605 \\u5DF2\\u6536\\u85CF":"\\u2606 \\u6536\\u85CF"}</button>')
     js = rep(js, j31_old, j31_new, "J31")
 
+    # J45: 详情页操作栏 —— 「刷新」前插入「重新扫描」（强制重扫该书所在目录，
+    #      可解决音频增删 / 音频内容替换（时长变化）/ 音频重命名等）
+    j45_old = '<button class="btn btn-ghost" id="btnRefreshBook">\\u{1F504} \\u5237\\u65B0</button>'
+    j45_new = ('<button class="btn btn-ghost" id="btnRescanBook" title="\\u91CD\\u65B0\\u626B\\u63CF\\u8BE5\\u4E66\\u76EE\\u5F55">'
+               '\\u{1F504} \\u91CD\\u65B0\\u626B\\u63CF</button>\n'
+               '          ' + j45_old)
+    js = rep(js, j45_old, j45_new, "J45")
+
+    # J46: 绑定详情页「重新扫描」按钮
+    j46_old = 'document.getElementById("btnRefreshBook").addEventListener("click",()=>{R(e.id)}),'
+    j46_new = ('document.getElementById("btnRescanBook").addEventListener("click",()=>{__rescanBook(e)}),'
+               + j46_old)
+    js = rep(js, j46_old, j46_new, "J46")
+
     # J32a: 详情页暂停/倍速按钮的状态同步函数（追加到 cycleSpeed 之后，IIFE 顶层可用）
     j32a_old = ('function se(){let e=[.75,1,1.25,1.5,1.75,2],t=e.indexOf(n.speed);n.speed=e[(t+1)%e.length];'
                 'let o=document.getElementById("btnSpeedFull");o&&(o.textContent=n.speed+"x");'
@@ -1688,10 +1829,17 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                'if(!arr.length){tr.innerHTML=\'<div class="rtree-msg">\\u4e66\\u5e93\\u6839\\u76ee\\u5f55\\u4e0b\\u6ca1\\u6709\\u5b50\\u76ee\\u5f55</div>\';return}'
                'arr.forEach(x=>tr.appendChild(__rtreeRow(x,0)))}'
                'catch(e){tr.innerHTML=\'<div class="rtree-msg">\\u76ee\\u5f55\\u52a0\\u8f7d\\u5931\\u8d25\\uff1a\'+(e&&e.message||e)+"</div>"}}'
-               'function __doRescan(dir,force){'
-               'let body=dir?{dir:dir,force:force?1:0}:{force:force?1:0};'
+               'function __doRescan(dir,mode){'
+               'let body=dir?{dir:dir}:{};'
+               'if(mode==="force")body.force=1;'
+               'if(mode==="remerge"){body={remerge:1};dir=""}'
                'return y("/api/rescan",{method:"POST",body:JSON.stringify(body)}).then(()=>{'
-               'u("\\u5df2\\u5f00\\u59cb\\u91cd\\u65b0\\u626b\\u63cf"+(dir?"\\uff1a"+dir:""));'
+               'u(mode==="remerge"?"\\u6b63\\u5728\\u91cd\\u5efa\\u5408\\u96c6..."'
+               ':"\\u5df2\\u5f00\\u59cb\\u91cd\\u65b0\\u626b\\u63cf"+(dir?"\\uff1a"+dir:""));'
+               'if(mode==="remerge"){return new Promise(res=>{setTimeout(async()=>{'
+               'try{await w()}catch(_){}'
+               'try{u("\\u5408\\u96c6\\u5df2\\u6309\\u5f53\\u524d\\u9608\\u503c\\u91cd\\u5efa")}catch(_){}'
+               'res()},1500)})}'
                'return new Promise(res=>{let n=0,iv=setInterval(async()=>{n++;'
                'try{let s=await y("/api/scan-progress");'
                'if(!s.scanning||n>200){clearInterval(iv);w();'
@@ -1708,9 +1856,11 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                'document.getElementById("rescanOkBtn").addEventListener("click",async()=>{'
                'let cbs=Array.prototype.slice.call(document.querySelectorAll("#rescanTree .rtree-cb:checked"));'
                'let dirs=cbs.map(c=>c.value);ov.hidden=!0;'
-               'let fr=document.getElementById("rescanForce"),force=!(!fr||!fr.checked);'
-               'if(!dirs.length){await __doRescan("",force);return}'
-               'for(let i=0;i<dirs.length;i++)await __doRescan(dirs[i],force)});})();'
+               'let mr=document.querySelector("input[name=rescanMode]:checked"),'
+               'mode=mr?mr.value:"auto";'
+               'if(mode==="remerge"){await __doRescan("",mode);return}'
+               'if(!dirs.length){await __doRescan("",mode);return}'
+               'for(let i=0;i<dirs.length;i++)await __doRescan(dirs[i],mode)});})();'
                # J44: 全局扫描进度轮询 —— 顶栏徽标 + 扫描结束自动刷新列表
                '(function(){if(window.__scanPoll)return;window.__scanPoll=1;let was=!1;'
                'async function tick(){let st=document.getElementById("scanStatus");if(!st)return;'
