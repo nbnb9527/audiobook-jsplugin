@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.36"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.35"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -194,11 +194,7 @@ def patch(src: str) -> str:
         "description:nm+\" \\u76EE\\u5F55\\u4E0B\\u7684\\u96F6\\u6563\\u97F3\\u9891\\u6587\\u4EF6\","
         "category:\"\\u672A\\u5206\\u7C7B\",tags:[],updatedAt:o||Date.now(),"
         "chapterCount:cs.length,totalSize:e,folderRelPath:dir};"
-        "t.books.push(bk),t.chaptersByBookId[bk.id]=cs;"
-        "if(__SH_NEW&&__SH_NEW[__SH_GRP])try{var __mm=0;"
-        "try{var __dm=await songloft.fs.stat(dir);__mm=Number((__dm&&__dm.modTime)||0)}catch(_){}"
-        "var __msig=await __shSig(auds,[],dir);"
-        "__SH_NEW[__SH_GRP].push({rel:rel+\"/__misc__\",mt:__mm,sig:__msig,book:bk,chapters:cs})}catch(_){}}"
+        "t.books.push(bk),t.chaptersByBookId[bk.id]=cs}"
         # __D: 递归判定书籍
         "async function __D(s,rel,t,IG,d){if(d>20)return;"
         "let dir=rel?s+\"/\"+rel:s,es;"
@@ -463,9 +459,6 @@ def patch_ui(src: str) -> str:
             "if(!AUD.has(ext))continue;"
             "try{await songloft.fs.unlink(p+\"/\"+x.name),removed++}catch(_){failed++}}"
             "return{filesFailed:failed,dirsTotal:0,dirsRemoved:0,dirGone:!1,fallback:\"\",keptFolder:!0,audioRemoved:removed}}\n"
-            # v1.3.36: 删除书籍后清除该路径所在顶层组的增量扫描分片——
-            # 否则残留分片会让下一次增量扫描继续复用旧数据（已删目录的条目残留）
-            "async function __SH_DROP(relp){try{if(!relp||relp.indexOf(M)!==0)return;var sg=relp.slice(M.length+1).split(\"/\")[0];if(sg)await songloft.fs.unlink(__SHD+\"/\"+ct(sg)+\".json\")}catch(_){}}\n"
         )
         p8i_old = ('async function __delBook(t,id){let o=t.books.find(b=>b.id===id);if(!o)return!1;'
                    'let p=o.folderRelPath;if(!p||typeof p!=="string"||p.indexOf(M)!==0)'
@@ -484,23 +477,18 @@ def patch_ui(src: str) -> str:
             'var p=o.folderRelPath;if(!p||typeof p!=="string"||p.indexOf(M)!==0)throw new Error(' + _qs("路径非法，拒绝删除") + ');'
             'if(p===M||p===M+"/")throw new Error(' + _qs("不能删除书库根目录") + ');'
             'if(o.virt==="shorts"){var mids=o.memberIds||[],agg={filesFailed:0,dirsTotal:0,dirsRemoved:0,dirGone:!1,fallback:"",keptFolder:!1,collection:!0,memberCount:mids.length};'
-            'var __sgs={};'
             'for(var mi=0;mi<mids.length;mi++){var mb=t.books.find(function(b){return b.id===mids[mi]});if(!mb||!mb.folderRelPath)continue;'
-            'var r2=await __RM(mb.folderRelPath);agg.filesFailed+=(r2.filesFailed||0);agg.dirsRemoved+=(r2.dirsRemoved||0);agg.dirsTotal+=(r2.dirsTotal||0);if(r2.fallback)agg.fallback=r2.fallback;'
-            'try{var __sg2=mb.folderRelPath.slice(M.length+1).split("/")[0];__sgs[__sg2]=1}catch(_){}}'
-            'try{for(var __gk in __sgs)await __SH_DROP(M+"/"+__gk)}catch(_){}'
+            'var r2=await __RM(mb.folderRelPath);agg.filesFailed+=(r2.filesFailed||0);agg.dirsRemoved+=(r2.dirsRemoved||0);agg.dirsTotal+=(r2.dirsTotal||0);if(r2.fallback)agg.fallback=r2.fallback}'
             't.books=t.books.filter(function(b){return b.id!==id&&mids.indexOf(b.id)<0});'
             'for(var mi2=0;mi2<mids.length;mi2++){delete t.chaptersByBookId[mids[mi2]];if(t.settings.favorites)t.settings.favorites=t.settings.favorites.filter(function(x){return x!==mids[mi2]});if(t.settings.titleOverrides)delete t.settings.titleOverrides[mids[mi2]];if(t.settings.playbackRates)delete t.settings.playbackRates[mids[mi2]]}'
             'delete t.chaptersByBookId[id];if(t.settings.favorites)t.settings.favorites=t.settings.favorites.filter(function(x){return x!==id});if(t.settings.titleOverrides)delete t.settings.titleOverrides[id];if(t.settings.playbackRates)delete t.settings.playbackRates[id];'
             'await t.saveSettings();try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
             'return agg}'
             'if(o.isMisc||o.category==="\\u672A\\u5206\\u7C7B"||(o.id||"").indexOf("__misc__")>=0){var rm=await __RMaudio(p);'
-            'await __SH_DROP(p);'
             't.books=t.books.filter(function(b){return b.id!==id});delete t.chaptersByBookId[id];if(t.settings.favorites)t.settings.favorites=t.settings.favorites.filter(function(x){return x!==id});if(t.settings.titleOverrides)delete t.settings.titleOverrides[id];if(t.settings.playbackRates)delete t.settings.playbackRates[id];'
             'await t.saveSettings();try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
             'return rm}'
             'var rm=await __RM(p);'
-            'await __SH_DROP(p);'
             't.books=t.books.filter(function(b){return b.id!==id});delete t.chaptersByBookId[id];if(t.settings.favorites)t.settings.favorites=t.settings.favorites.filter(function(x){return x!==id});if(t.settings.titleOverrides)delete t.settings.titleOverrides[id];if(t.settings.playbackRates)delete t.settings.playbackRates[id];'
             'await t.saveSettings();try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
             'return rm}')
@@ -677,17 +665,6 @@ def patch_ui(src: str) -> str:
                          # 诊断：查看/清理自动合集忽略名单（打散自动合集后可恢复）
                          # GET  → {ignoredShortsMembers:[...]}
                          # POST {action:"clear"} 清空；{action:"remove",ids:[...]} 移除指定成员
-                         # 诊断：列出增量扫描分片缓存（.cache/abscan）状态
-                         's.get("/api/debug/shards",async()=>{'
-                         'var out=[];'
-                         'try{var es=await songloft.fs.readdir(__SHD)||[];'
-                         'for(var i=0;i<es.length;i++){if(es[i].isDir)continue;'
-                         'try{var j=JSON.parse(await songloft.fs.readFile(__SHD+"/"+es[i].name));'
-                         'out.push({name:es[i].name,v:j&&j.v,g:j&&j.g,items:j&&j.items?j.items.length:0,'
-                         'misc:j&&j.items?j.items.filter(function(x){return x&&x.rel&&x.rel.indexOf("/__misc__")>=0}).length:0,'
-                         'ts:j&&j.ts})}catch(e){out.push({name:es[i].name,err:String(e)})}}}catch(e){'
-                         'return f({success:!0,data:{dirMissing:!0,err:String(e),shards:out}})}'
-                         'return f({success:!0,data:{count:out.length,shards:out}})}),'
                          's.get("/api/debug/ignore-list",async()=>{'
                          'return f({success:!0,data:{ignoredShortsMembers:'
                          '(t.settings.ignoredShortsMembers||[])}})}),'
@@ -1112,7 +1089,6 @@ def patch_ui(src: str) -> str:
                     '__SCANP.fastHit=0,__SCANP.fastMiss=0,__SCANP.fastProbe="";'
                     'var __SHD=".cache/abscan";'
                     'var __SH_OLD={},__SH_NEW={},__SH_GRP="",__SH_FORCE=0,__SH_REUSE=0;'
-                    'var __SH_ME=/\\/__misc__$/;'
                     'async function __shSig(auds,others,dir){'
                     'let h=ct(auds.join("|")+"#"+others.join("|"));'
                     'try{let m=await songloft.fs.stat(dir+"/metadata.json");if(m)h+="-"+Number(m.modTime||0)}catch(_){}'
@@ -1121,11 +1097,11 @@ def patch_ui(src: str) -> str:
                     'try{let es=await songloft.fs.readdir(__SHD)||[];'
                     'for(let i=0;i<es.length;i++){if(es[i].isDir)continue;'
                     'try{let j=JSON.parse(await songloft.fs.readFile(__SHD+"/"+es[i].name));'
-                    'if(j&&j.items&&j.v===2)for(let k=0;k<j.items.length;k++){let it=j.items[k];if(it&&it.rel)out[it.rel]=it}}catch(_){}}}catch(_){}'
+                    'if(j&&j.items)for(let k=0;k<j.items.length;k++){let it=j.items[k];if(it&&it.rel)out[it.rel]=it}}catch(_){}}}catch(_){}'
                     'return out}'
                     'async function __shSave(g,items){'
                     'try{await songloft.fs.mkdir(__SHD,{recursive:!0})}catch(_){}'
-                    'try{await songloft.fs.writeFile(__SHD+"/"+ct(g)+".json",JSON.stringify({g:g,ts:Date.now(),v:2,items:items||[]}))}catch(_){}}'
+                    'try{await songloft.fs.writeFile(__SHD+"/"+ct(g)+".json",JSON.stringify({g:g,ts:Date.now(),items:items||[]}))}catch(_){}}'
                     # 快通道：整组的目录 mtime 全部未变 → 整组直接复用，连目录遍历都省掉
                     'async function __shFast(g,s){'
                     'if(__SH_FORCE)return null;'
@@ -1134,7 +1110,7 @@ def patch_ui(src: str) -> str:
                     'if(!list.length)return null;'
                     'for(var i=0;i<list.length;i+=16){var b=list.slice(i,i+16);'
                     'var rs=await Promise.all(b.map(async it=>{'
-                    'try{var __rp=(it.rel||"").replace(__SH_ME,"");var st=await songloft.fs.stat(__rp?s+"/"+__rp:s);return Number((st&&st.modTime)||0)}'
+                    'try{var st=await songloft.fs.stat(it.rel?s+"/"+it.rel:s);return Number((st&&st.modTime)||0)}'
                     'catch(e){return -1}}));'
                     'for(var j=0;j<b.length;j++){var mv=rs[j];'
                     'if(!mv||mv!==b[j].mt){__SCANP.fastProbe=String(b[j].rel)+" exp"+b[j].mt+" act"+mv;return null}}}'
@@ -1979,10 +1955,9 @@ def patch_static(build_dir: str) -> None:
                 '        <div class="col-hint" id="scHint"></div>\n'
                 '        <div class="edit-field">\n'
                 '          <div class="sc-head">\n'
-                '            <label class="sc-head-title" style="margin:0">要移出的成员</label>\n'
+                '            <label style="margin:0">选择要移出的成员（不勾选直接确认 = 打散整个合集）</label>\n'
                 '            <button class="btn btn-ghost" id="scToggleAll" type="button">全不选</button>\n'
                 '          </div>\n'
-                '          <div class="sc-tip">不勾选直接确认 = 打散整个合集</div>\n'
                 '          <div id="scList" class="sc-list"></div>\n'
                 '        </div>\n'
                 '        <div class="edit-actions">\n'
@@ -2370,10 +2345,8 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
     # v1.3.35：favoritesOnly 复选框已从 HTML 移除（筛选下拉的「收藏」替代），
     # 原绑定无空值保护会抛错断链，改为安全绑定。
     jg4a_old = 'document.getElementById("favoritesOnly").addEventListener("change",()=>{n.page=1,w()}),'
-    # 注意：此处处于逗号表达式链 A(),B(),C() 中间，只能插入「表达式」，不能出现
-    # var/let/const 等语句，否则 SyntaxError: Unexpected token 'var'（v1.3.36 修复）。
-    jg4a_new = ('(__fo=document.getElementById("favoritesOnly"))'
-                '&&__fo.addEventListener("change",()=>{n.page=1,w()}),'
+    jg4a_new = ('var __fo=document.getElementById("favoritesOnly");'
+                '__fo&&__fo.addEventListener("change",()=>{n.page=1,w()}),'
                 'document.getElementById("viewMode").addEventListener("change",'
                 '()=>{let v=document.getElementById("viewMode").value||"large";__setViewMode(v),fe()}),'
                 'function(){try{__syncViewModeUI()}catch(_){}}(),')
@@ -2785,14 +2758,6 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
     js = rep(js, j37_old, j37_new, "J37")
 
     open(js_path, "w", encoding="utf-8", newline="").write(js)
-    # 前端语法自检：minified 单行 bundle 里的语法错误（如逗号表达式中插入 var 语句）
-    # 必须在构建阶段拦下，否则只在浏览器运行时静默抛 SyntaxError、整个前端不工作。
-    import subprocess as _sp
-    import shutil as _shutil
-    _node = _shutil.which("node") or r"C:\Users\Administrator\.workbuddy\binaries\node\versions\22.22.2-2\node.exe"
-    _chk = _sp.run([_node, "--check", js_path], capture_output=True)
-    if _chk.returncode != 0:
-        raise AssertionError("app.bundle 前端语法检查失败:\n" + _chk.stderr.decode("utf-8", "replace")[:2000])
     print("  app.bundle: +显示方式/顺序/别名/路径复制/播放速度记忆 接线")
 
     # ===== style.*.css =====
@@ -2906,9 +2871,6 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         "  animation: scan-spin 1.2s linear infinite; }\n"
         "@keyframes scan-spin { to { transform: rotate(360deg); } }\n"
         ".scan-pill[hidden] { display: none !important; }\n"
-        # v1.3.36：按钮 hidden 硬化——详情页操作栏按钮（重新扫描/打散合集）依赖 hidden 显隐，
-        # 若被组件库 display 规则或浏览器缓存影响会误显示，这里强制兜底。
-        ".book-hero .btn[hidden], .book-detail .btn[hidden], #bookDetail .btn[hidden] { display: none !important; }\n"
         ".rtree-force { display: block; font-size: 12px; color: var(--text-3); padding: 6px 10px; cursor: pointer; }\n"
         "/* ===== v1.3.27 重新扫描弹窗目录结构说明 + 设置弹窗居中加宽 ===== */\n"
         ".rescan-dirinfo { margin: 0 0 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); overflow: hidden; }\n"
@@ -2952,27 +2914,11 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         # ---- v1.3.32 第四组：合集弹窗提示 ----
         ".col-hint { font-size: 12px; color: var(--text-3); margin-top: 6px; }\n"
         # ---- v1.3.35 打散合集成员选择弹窗 ----
-        # v1.3.36 修复：原版 `.edit-field label { display:block; margin-bottom:4px }` 优先级(0,1,1)
-        #   高于 `.sc-head-title`(0,1,0)，会把标题压成块级并加下外边距，在 flex 居中容器里
-        #   垂直错位（与右侧按钮不在一条线）。这里用 `.edit-field .sc-head .sc-head-title`(0,3,0)
-        #   明确覆盖 display/margin/line-height，确保与按钮垂直居中对齐。
-        ".sc-head { display: flex !important; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 2px; }\n"
-        # v1.3.36 修复(三)追加：标题的 color 同样去掉 `!important`（WebF 对
-        #   `!important`+嵌套 var() 解析失败会导致文字不可见）。选择器已是 (0,3,0)，
-        #   本身足以压过 `.edit-field label`(0,1,1)，无需 !important。
-        ".edit-field .sc-head .sc-head-title, .sc-head .sc-head-title { display: block !important; flex: 1 1 auto; min-width: 0; margin: 0 !important; padding: 0 !important; font-size: 13px; font-weight: 400; line-height: 1.4; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n"
-        ".edit-field .sc-head .btn, .sc-head .btn { flex: none !important; margin: 0 !important; padding: 2px 10px !important; font-size: 12px !important; line-height: 1.4 !important; }\n"
-        ".edit-field .sc-tip, .sc-tip { display: block; font-size: 12px; font-weight: 400; color: var(--text-3); margin: 0 0 6px; line-height: 1.4; }\n"
+        ".sc-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }\n"
+        ".sc-head label { font-size: 13px; color: var(--text-2); }\n"
+        ".sc-head .btn { padding: 2px 10px; font-size: 12px; }\n"
         ".sc-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 10px; }\n"
-        # v1.3.36 修复(三)：上一步给 `.sc-item` 的 color/font-weight 加了 `!important`，
-        #   结果成员行书名整行不可见（只剩勾选框）。
-        #   根因：本插件跑在宿主 WebF 容器里，`color: var(--text) !important` 的
-        #   `--text` 是两级 var() 链（--text -> --md-on-surface），WebF 对
-        #   `!important` + 嵌套 var() 解析失败 → 颜色无效 → 文字透明不可见。
-        #   改法：不再用 `!important`，改为把选择器提到 (0,2,0) `.sc-list .sc-item`
-        #   来压过 `.edit-field label`(0,1,1)，color/font-weight 保持 v1.3.35 里
-        #   实测可见的原样声明（不覆盖 color，让它沿用可解析的 var(--text)）。
-        ".sc-list .sc-item { display: flex; align-items: center; gap: 8px; margin: 0; padding: 5px 0; cursor: pointer; font-size: 13px; color: var(--text); line-height: 1.4; }\n"
+        ".sc-item { display: flex; align-items: center; gap: 8px; padding: 5px 0; cursor: pointer; font-size: 13px; color: var(--text); }\n"
         ".sc-item input { flex: none; }\n"
         ".sc-item span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n")
     open(css_path, "w", encoding="utf-8", newline="").write(css)

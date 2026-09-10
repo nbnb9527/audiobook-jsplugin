@@ -1,0 +1,21 @@
+==================== replace a[67:67] b[67:67] ====================
+  A| PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.35"
+  B| PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.36"
+==================== replace a[197:197] b[197:197] ====================
+  A|         "t.books.push(bk),t.chaptersByBookId[bk.id]=cs}"
+  B| "t.books.push(bk),t.chaptersByBookId[bk.id]=cs}"
+==================== insert a[462:461] b[462:464] ====================
+  B|             # v1.3.36: 删除书籍后清除该路径所在顶层组的增量扫描分片——
+  B|             # 否则残留分片会让下一次增量扫描继续复用旧数据（已删目录的条目残留）
+  B|             "async function __SH_DROP(relp){}\n"
+==================== insert a[480:479] b[483:483] ====================
+  B|             'var __sgs={};'
+==================== replace a[481:481] b[485:487] ====================
+  A|             'var r2=await __RM(mb.folderRelPath);agg.filesFailed+=(r2.filesFailed||0);agg.dirsRemoved+=(r2.dirsRemoved||0);agg.dirsTotal+=(r2.dirsTotal||0);if(r2.fallback)agg.fallback=r2.fallback}'
+  B|             'var r2=await __RM(mb.folderRelPath);agg.filesFailed+=(r2.filesFailed||0);agg.dirsRemoved+=(r2.dirsRemoved||0);agg.dirsTotal+=(r2.dirsTotal||0);if(r2.fallback)agg.fallback=r2.fallback;'
+  B|             'try{var __sg2=mb.folderRelPath.slice(M.length+1).split("/")[0];__sgs[__sg2]=1}catch(_){}}'
+  B|             'try{for(var __gk in __sgs)await __SH_DROP(M+"/"+__gk)}catch(_){}}'
+==================== insert a[488:487] b[494:494] ====================
+  B|             'await __SH_DROP(p);'
+==================== insert a[492:491] b[499:499] ====================
+  B|             'await __SH_DROP(p);'
