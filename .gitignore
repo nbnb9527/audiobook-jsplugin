@@ -30,6 +30,11 @@ flatten_map_*.txt
 
 exp_*.py
 exp_*.js
+probe*.js
+orig_*.js
+orig_*.html
+package.json
+package-lock.json
 test-*.js
 test_*.js
 diag_*.js

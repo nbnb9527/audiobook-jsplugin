@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.26"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.27"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -87,6 +87,12 @@ def extract_source(zf: zipfile.ZipFile) -> str:
 def _u(s: str) -> str:
     # 中文转 \uXXXX 转义（与官方源码风格一致，避免不同环境下 jsc 处理源码的编码差异）
     return "".join(c if ord(c) < 128 else "\\u%04x" % ord(c) for c in s)
+
+
+def _qs(s: str) -> str:
+    # 返回一个「带双引号、内部中文已转义」的 JS 字符串字面量，
+    # 用于把中文安全嵌进拼接出的 JS 源码（避免 \uXXXX 脱离引号变成非法 token）。
+    return '"' + _u(s) + '"'
 
 
 # ---------- 2. 打补丁 ----------
@@ -439,6 +445,55 @@ def patch_ui(src: str) -> str:
         assert src.count(p8h_et) == 1, "P8h et 锚点数量异常"
         src = src.replace(p8h_et, p8h_helper + p8h_et)
 
+        # P8i: 允许删除「未分类」（仅删音频文件）与「合集」（删每个成员书文件夹）
+        #   - 未分类(isMisc / category==="未分类" / id 含 __misc__)：只删目录下的音频文件，保留文件夹（__RMaudio）
+        #   - 合集(virt:"shorts")：遍历 memberIds 删每个成员书文件夹，再清掉合集与成员记录
+        p8i_rmaudio = (
+            "async function __RMaudio(p){"
+            "var AUD=new Set([\".mp3\",\".m4a\",\".m4b\",\".wav\",\".aac\",\".flac\",\".ogg\",\".wma\",\".opus\",\".ape\",\".wv\",\".tta\",\".mp2\",\".ac3\"]);"
+            "var es=[],failed=0,removed=0;"
+            "try{es=await songloft.fs.readdir(p)||[]}catch(_){return{filesFailed:0,dirsTotal:0,dirsRemoved:0,dirGone:!1,fallback:\"\",keptFolder:!0,audioRemoved:0}}"
+            "for(var x of es){if(x.isDir)continue;"
+            "var ext=\".\"+(x.name.split(\".\").pop()||\"\").toLowerCase();"
+            "if(!AUD.has(ext))continue;"
+            "try{await songloft.fs.unlink(p+\"/\"+x.name),removed++}catch(_){failed++}}"
+            "return{filesFailed:failed,dirsTotal:0,dirsRemoved:0,dirGone:!1,fallback:\"\",keptFolder:!0,audioRemoved:removed}}\n"
+        )
+        p8i_old = ('async function __delBook(t,id){let o=t.books.find(b=>b.id===id);if(!o)return!1;'
+                   'let p=o.folderRelPath;if(!p||typeof p!=="string"||p.indexOf(M)!==0)'
+                   'throw new Error("\\u8DEF\\u5F84\\u975E\\u6CD5\\uFF0C\\u62D2\\u7EDD\\u5220\\u9664");'
+                   'if(p===M||p===M+"/")throw new Error("\\u4E0D\\u80FD\\u5220\\u9664\\u4E66\\u5E93\\u6839\\u76EE\\u5F55");'
+                   'if(o.isMisc||o.category==="\\u672A\\u5206\\u7C7B"||(o.id||"").indexOf("__misc__")>=0)throw new Error("\\u672A\\u5206\\u7C7B\\u5408\\u96C6\\u4E0D\\u53EF\\u6574\\u672C\\u5220\\u9664\\uFF0C\\u8BF7\\u5728\\u6587\\u4EF6\\u7BA1\\u7406\\u5668\\u4E2D\\u624B\\u52A8\\u6E05\\u7406");'
+                   'let rm=await __RM(p);'
+                   't.books=t.books.filter(b=>b.id!==id);delete t.chaptersByBookId[id];'
+                   't.settings.favorites=t.settings.favorites.filter(x=>x!==id);'
+                   'if(t.settings.titleOverrides)delete t.settings.titleOverrides[id];'
+                   'if(t.settings.playbackRates)delete t.settings.playbackRates[id];'
+                   'await t.saveSettings();try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
+                   'return rm}\n')
+        p8i_new = (p8i_rmaudio +
+            'async function __delBook(t,id){var o=t.books.find(function(b){return b.id===id});if(!o)return!1;'
+            'var p=o.folderRelPath;if(!p||typeof p!=="string"||p.indexOf(M)!==0)throw new Error(' + _qs("路径非法，拒绝删除") + ');'
+            'if(p===M||p===M+"/")throw new Error(' + _qs("不能删除书库根目录") + ');'
+            'if(o.virt==="shorts"){var mids=o.memberIds||[],agg={filesFailed:0,dirsTotal:0,dirsRemoved:0,dirGone:!1,fallback:"",keptFolder:!1,collection:!0,memberCount:mids.length};'
+            'for(var mi=0;mi<mids.length;mi++){var mb=t.books.find(function(b){return b.id===mids[mi]});if(!mb||!mb.folderRelPath)continue;'
+            'var r2=await __RM(mb.folderRelPath);agg.filesFailed+=(r2.filesFailed||0);agg.dirsRemoved+=(r2.dirsRemoved||0);agg.dirsTotal+=(r2.dirsTotal||0);if(r2.fallback)agg.fallback=r2.fallback}'
+            't.books=t.books.filter(function(b){return b.id!==id&&mids.indexOf(b.id)<0});'
+            'for(var mi2=0;mi2<mids.length;mi2++){delete t.chaptersByBookId[mids[mi2]];if(t.settings.favorites)t.settings.favorites=t.settings.favorites.filter(function(x){return x!==mids[mi2]});if(t.settings.titleOverrides)delete t.settings.titleOverrides[mids[mi2]];if(t.settings.playbackRates)delete t.settings.playbackRates[mids[mi2]]}'
+            'delete t.chaptersByBookId[id];if(t.settings.favorites)t.settings.favorites=t.settings.favorites.filter(function(x){return x!==id});if(t.settings.titleOverrides)delete t.settings.titleOverrides[id];if(t.settings.playbackRates)delete t.settings.playbackRates[id];'
+            'await t.saveSettings();try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
+            'return agg}'
+            'if(o.isMisc||o.category==="\\u672A\\u5206\\u7C7B"||(o.id||"").indexOf("__misc__")>=0){var rm=await __RMaudio(p);'
+            't.books=t.books.filter(function(b){return b.id!==id});delete t.chaptersByBookId[id];if(t.settings.favorites)t.settings.favorites=t.settings.favorites.filter(function(x){return x!==id});if(t.settings.titleOverrides)delete t.settings.titleOverrides[id];if(t.settings.playbackRates)delete t.settings.playbackRates[id];'
+            'await t.saveSettings();try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
+            'return rm}'
+            'var rm=await __RM(p);'
+            't.books=t.books.filter(function(b){return b.id!==id});delete t.chaptersByBookId[id];if(t.settings.favorites)t.settings.favorites=t.settings.favorites.filter(function(x){return x!==id});if(t.settings.titleOverrides)delete t.settings.titleOverrides[id];if(t.settings.playbackRates)delete t.settings.playbackRates[id];'
+            'await t.saveSettings();try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
+            'return rm}')
+        assert src.count(p8i_old) == 1, "P8i 锚点数量异常"
+        src = src.replace(p8i_old, p8i_new)
+
     if not globals().get("SKIP_P8H_ROUTE", False):
         # 锚点收窄：不含 et 自身的闭合 '}'（原 '})}' 末尾 '}' 由源码保留，
         # 避免在 route 片段里重新推导结尾括号数导致错配。
@@ -449,7 +504,9 @@ def patch_ui(src: str) -> str:
                          'if(r===!1)return h("\\u672A\\u627E\\u5230\\u8BE5\\u4E66\\u7C4D",404);'
                          'return f({success:!0,data:{id:e.id,dirGone:r.dirGone,'
                          'filesFailed:r.filesFailed,dirsRemoved:r.dirsRemoved,'
-                         'dirsTotal:r.dirsTotal,fallback:r.fallback||""}})}'
+                         'dirsTotal:r.dirsTotal,fallback:r.fallback||"",'
+                         'keptFolder:r.keptFolder||!1,audioRemoved:r.audioRemoved||0,'
+                         'collection:r.collection||!1,memberCount:r.memberCount||0}})}'
                          'catch(err){return h(String(err&&err.message||err),500)}}),'
                          # 清理书库内空目录（只删真正空的目录，任何非空目录都不动，
                          # 跳过 _ARCHIVE_TRASH/_DEDUPE_TRASH 与 .scanignore 中的忽略项）
@@ -1403,6 +1460,61 @@ def patch_static(build_dir: str) -> None:
                '    <!-- 设置弹窗 -->')
     html = rep(html, h15_old, h15_new, "H15")
 
+    # H16: 移除首页「全部书籍」后的 ⓘ 目录结构说明按钮（说明已迁移到重新扫描弹窗）
+    h16_old = ('            <h2 class="section-title" id="booksSectionTitle">全部书籍</h2>\n'
+               '            <button class="info-btn" id="dirInfoBtn" title="目录结构说明">ⓘ</button>\n')
+    h16_new = '            <h2 class="section-title" id="booksSectionTitle">全部书籍</h2>\n'
+    html = rep(html, h16_old, h16_new, "H16")
+
+    # H17: 删除旧的「目录结构说明」弹窗（说明已迁移到重新扫描弹窗；HTML 整体移除，避免死节点）
+    import re as _re
+    _di_before = html.count('id="dirInfoOverlay"')
+    html = _re.sub(r'    <!-- 目录结构说明弹窗 -->.*?    </div>\n', '', html, count=1, flags=_re.S)
+    assert _di_before == 1 and html.count('id="dirInfoOverlay"') == 0, "H17 目录结构弹窗移除异常"
+
+    # H15b: 在重新扫描弹窗标题后插入「书库目录结构与扫描规则」说明（按当前扫描规则重新生成）
+    h15b_old = ('        <h3>重新扫描</h3>\n'
+                '        <p class="delete-info">选择扫描范围：可扫描整个书库，或只重新扫描某个文件夹'
+                '（新增/移动文件后用它按需刷新，比全库扫描快得多）。</p>\n')
+    h15b_new = ('        <h3>重新扫描</h3>\n'
+                '        <div class="rescan-dirinfo">\n'
+                '          <details open>\n'
+                '            <summary>📁 书库目录结构与扫描规则</summary>\n'
+                '            <ul>\n'
+                '              <li>有声书放在书库根目录下，每本书一个文件夹（默认 <code>/app/audiobook</code>，取决于宿主挂载位置）。</li>\n'
+                '              <li>最多递归 20 层子目录；自动忽略系统目录：<code>@eaDir</code>、<code>@SynologyResource</code>、<code>#recycle</code>、<code>@sharebin</code>、<code>_ARCHIVE_TRASH</code>、<code>_DEDUPE_TRASH</code>。</li>\n'
+                '              <li>封面优先识别 <code>cover.*</code> / <code>folder.*</code> / <code>封面.*</code>；<code>metadata.json</code> 存简介/类型/标签/作者（可在详情页编辑自动生成）。</li>\n'
+                '              <li>含子目录的目录：每个子目录各成一本书，其根目录下的散落音频归入「目录名-未分类」一本。</li>\n'
+                '              <li>同目录下章节数 ≤ 阈值的多本书，自动合并为一本「短篇合集」（设置可调阈值，改后用下方「仅重建合集」即时生效，不读盘）。</li>\n'
+                '            </ul>\n'
+                '          </details>\n'
+                '        </div>\n'
+                '        <p class="delete-info">选择扫描范围：可扫描整个书库，或只重新扫描某个文件夹'
+                '（新增/移动文件后用它按需刷新，比全库扫描快得多）。</p>\n')
+    html = rep(html, h15b_old, h15b_new, "H15b")
+
+    # H18: 设置弹窗「帮助文档」下方增加「修改版说明」，指向 GitHub README
+    h18_old = ('              <div class="settings-about-row">\n'
+               '                <span class="settings-about-label">帮助文档</span>\n'
+               '                <a href="https://mp.weixin.qq.com/s/9eLpiWXsIzbmS1MI_eolHg" target="_blank" rel="noopener" style="color:var(--primary);text-decoration:none">📖</a>\n'
+               '              </div>\n')
+    h18_new = ('              <div class="settings-about-row">\n'
+               '                <span class="settings-about-label">帮助文档</span>\n'
+               '                <a href="https://mp.weixin.qq.com/s/9eLpiWXsIzbmS1MI_eolHg" target="_blank" rel="noopener" style="color:var(--primary);text-decoration:none">📖</a>\n'
+               '              </div>\n'
+               '              <div class="settings-about-row">\n'
+               '                <span class="settings-about-label">修改版说明</span>\n'
+               '                <a href="https://github.com/nbnb9527/audiobook-jsplugin" target="_blank" rel="noopener" style="color:var(--primary);text-decoration:none">📝 nbnb9527 修改版（GitHub）</a>\n'
+               '              </div>\n')
+    html = rep(html, h18_old, h18_new, "H18")
+
+    # H19: 删除确认弹窗的警告语加上 id，供前端按书籍类型动态改写
+    h19_old = ('        <p class="delete-warn">⚠️ 此操作将<strong>永久删除</strong>该书所在的整个文件夹及其全部音频、图片等文件，'
+               '<strong>删除后不可恢复</strong>。</p>\n')
+    h19_new = ('        <p class="delete-warn" id="delBookWarn">⚠️ 此操作将<strong>永久删除</strong>该书所在的整个文件夹及其全部音频、图片等文件，'
+               '<strong>删除后不可恢复</strong>。</p>\n')
+    html = rep(html, h19_old, h19_new, "H19")
+
     open(html_path, "w", encoding="utf-8", newline="").write(html)
     print("  index.html: +显示方式/顺序下拉 +别名字段 +路径复制 +设置默认显示方式")
 
@@ -1569,6 +1681,11 @@ def patch_static(build_dir: str) -> None:
         "let o=document.getElementById(\"deleteOverlay\");if(!o)return;"
         "document.getElementById(\"delBookTitle\").textContent=b.title||\"\";"
         "document.getElementById(\"delBookPath\").textContent=__relPath(b.folderRelPath)||\"(书库根目录)\";"
+        "let wn=document.getElementById(\"delBookWarn\");"
+        "if(wn){"
+        "if(b.virt===\"shorts\"){let n2=(b.memberIds||[]).length;wn.textContent=" + _qs("⚠️ 将删除该合集内 ") + "+n2+" + _qs(" 本短篇各自的文件夹，删除后不可恢复。") + ";}"
+        "else if(b.isMisc||b.category===\"\\u672A\\u5206\\u7C7B\"||(o.id||\"\").indexOf(\"__misc__\")>=0){wn.textContent=" + _qs("⚠️ 将删除该文件夹下的全部音频文件，文件夹本身保留。") + ";}"
+        "else{wn.textContent=" + _qs("⚠️ 此操作将永久删除该书所在的整个文件夹及其全部音频、图片等文件，删除后不可恢复。") + ";}}"
         "window.__delId=id;o.hidden=!1}\n"
         "async function __doDel(){let id=window.__delId;if(!id)return;"
         "let btn=document.getElementById(\"delConfirmBtn\");btn.disabled=!0,btn.textContent=\"\\u5220\\u9664\\u4E2D...\";"
@@ -1578,9 +1695,10 @@ def patch_static(build_dir: str) -> None:
         "if(r.success===!1)throw new Error(r.error||\"\\u5220\\u9664\\u5931\\u8D25\");"
         "let t=n.books.find(x=>x.id===id);"
         "document.getElementById(\"deleteOverlay\").hidden=!0,window.__delId=null,"
-        "u(r.data&&!r.data.dirGone?"
-        "\"\\u6587\\u4EF6\\u5DF2\\u5220\\u9664\\uFF0C\\u4F46\\u6587\\u4EF6\\u5939\\u672A\\u80FD\\u79FB\\u9664\\uFF0C\\u8BF7\\u624B\\u52A8\\u6E05\\u7406\""
-        ":\"\\u5DF2\\u5220\\u9664\\uFF1A\"+(t?t.title:\"\")),await w()}"
+        "u(r.collection?(" + _qs("已删除合集「") + "+(t?t.title:\"\")+" + _qs("」及其 ") + "+r.memberCount+" + _qs(" 本短篇") + ")"
+        ":r.keptFolder?(" + _qs("已删除音频文件，文件夹已保留：") + "+(t?t.title:\"\"))"
+        ":r.dirGone?(" + _qs("已删除：") + "+(t?t.title:\"\"))"
+        ":" + _qs("文件已删除，但文件夹未能移除，请手动清理") + "),await w()}"
         "catch(e){u(\"\\u5220\\u9664\\u5931\\u8D25\\uFF1A\"+e.message)}"
         "finally{btn.disabled=!1,btn.textContent=\"\\u786E\\u8BA4\\u5220\\u9664\"}}\n"
         "function __cardEdit(id){let b=n.books.find(x=>x.id===id);if(!b)return;"
@@ -1593,10 +1711,10 @@ def patch_static(build_dir: str) -> None:
     j15_old = "        <button class=\"book-card-play\" data-play=\"${t.id}\" title=\"\\u64AD\\u653E\">\\u25B6</button>"
     j15_new = (j15_old + "\n"
                "        <button class=\"book-card-edit\" data-edit=\"${t.id}\" title=\"\\u7F16\\u8F91\">\\u270E</button>\n"
-               "        ${(t.isMisc||t.category===\"\\u672A\\u5206\\u7C7B\"||(t.id||\"\").indexOf(\"__misc__\")>=0)"
-               "?'<button class=\"book-card-del dis\" data-del=\"'+t.id+'\" title=\""
-               "\\u672A\\u5206\\u7C7B\\u5408\\u96C6\\u4E0D\\u53EF\\u6574\\u672C\\u5220\\u9664\" disabled>\\u2716</button>'"
-               ":'<button class=\"book-card-del\" data-del=\"'+t.id+'\" title=\"\\u5220\\u9664\">\\u2716</button>'}")
+               "        <button class=\"book-card-del\" data-del=\"${t.id}\" title=\""
+               "${(t.virt===\"shorts\")?\"\\u5220\\u9664\\u5408\\u96C6\\uFF1A\\u5220\\u9664\\u5176\\u4E0B\\u5404\\u77ED\\u7BC7\\u7684\\u6587\\u4EF6\\u5939\""
+               ":(t.isMisc||t.category===\"\\u672A\\u5206\\u7C7B\"||(t.id||\"\").indexOf(\"__misc__\")>=0)?\"\\u5220\\u9664\\u672A\\u5206\\u7C7B\\uFF1A\\u4EC5\\u5220\\u9664\\u97F3\\u9891\\u6587\\u4EF6\\uFF0C\\u4FDD\\u7559\\u6587\\u4EF6\\u5939\""
+               ":\"\\u5220\\u9664\"}>\\u2716</button>")
     js = rep(js, j15_old, j15_new, "J15")
 
     # J16: 绑定删除按钮点击事件
@@ -1621,6 +1739,13 @@ def patch_static(build_dir: str) -> None:
                "document.getElementById(\"deleteOverlay\").addEventListener(\"click\",a=>{"
                "a.target===a.currentTarget&&(a.currentTarget.hidden=!0,window.__delId=null)}),")
     js = rep(js, j17_old, j17_new, "J17")
+
+    # J18: 移除旧的「目录结构说明」ⓘ 按钮绑定（说明已迁移到重新扫描弹窗，HTML 也已删除）
+    j18_old = ('document.getElementById("dirInfoBtn").addEventListener("click",()=>{document.getElementById("dirInfoOverlay").hidden=!1}),'
+               'document.getElementById("dirInfoClose").addEventListener("click",()=>{document.getElementById("dirInfoOverlay").hidden=!0}),'
+               'document.getElementById("dirInfoOverlay").addEventListener("click",a=>{a.target===a.currentTarget&&(a.currentTarget.hidden=!0)}),')
+    j18_new = ''
+    js = rep(js, j18_old, j18_new, "J18")
 
     # J19: 从列表卡片打开编辑时（window.__editFromList），保存成功后刷新列表，
     #      而不是跳到书籍详情页（原生行为 W(),await R(t)）
@@ -2044,7 +2169,17 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         "  animation: scan-spin 1.2s linear infinite; }\n"
         "@keyframes scan-spin { to { transform: rotate(360deg); } }\n"
         ".scan-pill[hidden] { display: none !important; }\n"
-        ".rtree-force { display: block; font-size: 12px; color: var(--text-3); padding: 6px 10px; cursor: pointer; }\n")
+        ".rtree-force { display: block; font-size: 12px; color: var(--text-3); padding: 6px 10px; cursor: pointer; }\n"
+        "/* ===== v1.3.27 重新扫描弹窗目录结构说明 + 设置弹窗居中加宽 ===== */\n"
+        ".rescan-dirinfo { margin: 0 0 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); overflow: hidden; }\n"
+        ".rescan-dirinfo summary { cursor: pointer; padding: 10px 12px; font-size: 13px; font-weight: 600; color: var(--text); user-select: none; }\n"
+        ".rescan-dirinfo summary:hover { color: var(--primary); }\n"
+        ".rescan-dirinfo ul { margin: 0; padding: 4px 12px 12px 30px; }\n"
+        ".rescan-dirinfo li { font-size: 12px; line-height: 1.7; color: var(--text-2); margin: 2px 0; }\n"
+        ".rescan-dirinfo code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; background: var(--surface); padding: 1px 5px; border-radius: 4px; color: var(--text); }\n"
+        "#settingsOverlay { align-items: center; }\n"
+        ".settings-sheet { max-width: 600px; width: 92%; max-height: 86vh; border-radius: var(--radius-lg); animation: ab-fade-in .2s ease; }\n"
+        "@keyframes ab-fade-in { from { opacity: 0; } to { opacity: 1; } }\n")
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     print("  style.css: +mode-small/mode-list +别名/路径/设置行样式")
