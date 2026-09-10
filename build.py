@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.28"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.29"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -1587,10 +1587,14 @@ def patch_static(build_dir: str) -> None:
     html = rep(html, h16_old, h16_new, "H16")
 
     # H17: 删除旧的「目录结构说明」弹窗（说明已迁移到重新扫描弹窗；HTML 整体移除，避免死节点）
+    # v1.3.28 及之前的正则在第一个 "    </div>\n" 就截断，只删掉弹窗外壳，
+    # 残留 dir-info-body 正文和多余闭合标签成孤儿节点直接渲染在页面底部 —— v1.3.29 改为整体移除
     import re as _re
     _di_before = html.count('id="dirInfoOverlay"')
-    html = _re.sub(r'    <!-- 目录结构说明弹窗 -->.*?    </div>\n', '', html, count=1, flags=_re.S)
-    assert _di_before == 1 and html.count('id="dirInfoOverlay"') == 0, "H17 目录结构弹窗移除异常"
+    assert _di_before == 1, "H17 目录结构弹窗锚点异常"
+    html = _re.sub(r'    <!-- 目录结构说明弹窗 -->.*?(?=    <!-- 悬浮播放器 FAB -->)', '', html, count=1, flags=_re.S)
+    assert html.count('id="dirInfoOverlay"') == 0, "H17 目录结构弹窗移除异常"
+    assert 'dir-info-body' not in html, "H17 目录结构正文残留"
 
     # H15b: 在重新扫描弹窗标题后插入「书库目录结构与扫描规则」说明（按当前扫描规则重新生成）
     h15b_old = ('        <h3>重新扫描</h3>\n'
@@ -2035,6 +2039,16 @@ __msBindBar();
 async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
     js = rep(js, jg3e_old, jg3e_new, "JG3e")
 
+    # JG4a: viewMode 下拉 change 绑定 + 初始同步 —— v1.3.11「接线」补丁只加了
+    # __getViewMode/__setViewMode/__syncViewModeUI 函数，但漏了给下拉绑 change 事件，
+    # 导致「显示方式」切到大图标/小图标/列表都不生效（v1.3.29 修复）
+    jg4a_old = ('document.getElementById("favoritesOnly").addEventListener("change",()=>{n.page=1,w()}),')
+    jg4a_new = (jg4a_old +
+                'document.getElementById("viewMode").addEventListener("change",'
+                '()=>{let v=document.getElementById("viewMode").value||"large";__setViewMode(v),fe()}),'
+                'function(){try{__syncViewModeUI()}catch(_){}}(),')
+    js = rep(js, jg4a_old, jg4a_new, "JG4a")
+
     # J23: De() 里绑定清空/确认弹窗/跳转按钮（IIFE 隔离作用域，避免变量名冲突）
     j23_old = ("document.getElementById(\"nextPage\").addEventListener(\"click\",()=>{let a=Math.max(1,Math.ceil(n.total/n.pageSize));n.page<a&&(n.page++,w())})")
     j23_new = ("document.getElementById(\"nextPage\").addEventListener(\"click\",()=>{let a=Math.max(1,Math.ceil(n.total/n.pageSize));n.page<a&&(n.page++,w())}),function(){let a=document.getElementById(\"recentClearBtn\");a&&a.addEventListener(\"click\",__clearRecent);let b=document.getElementById(\"confirmOkBtn\");b&&b.addEventListener(\"click\",__runConfirm);let c=document.getElementById(\"confirmCancelBtn\");c&&c.addEventListener(\"click\",__closeConfirm);let d=document.getElementById(\"confirmOverlay\");d&&d.addEventListener(\"click\",e=>{e.target===d&&__closeConfirm()});let f=document.getElementById(\"pageGoBtn\");f&&f.addEventListener(\"click\",__goPage);let g=document.getElementById(\"pageInput\");g&&g.addEventListener(\"keydown\",e=>{\"Enter\"===e.key&&__goPage()})}()")
@@ -2460,7 +2474,9 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         ".bedit-row textarea, .bedit-fields input, .bedit-fields select { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text); padding: 6px 8px; font-size: 13px; }\n"
         ".bedit-row textarea { flex: 1; resize: vertical; }\n"
         ".bedit-cover { flex: 1; font-size: 13px; color: var(--text); display: flex; align-items: center; gap: 6px; padding-top: 7px; }\n"
-        ".bedit-note { font-size: 12px; line-height: 1.6; color: var(--text-2); margin: 10px 0 0; }\n")
+        ".bedit-note { font-size: 12px; line-height: 1.6; color: var(--text-2); margin: 10px 0 0; }\n"
+        # ---- v1.3.29 修复：重新扫描弹窗加宽（默认 .edit-modal 480px / .delete-modal 420px 放不下目录树）----
+        "#rescanOverlay .edit-modal { max-width: 880px; width: 94%; }\n")
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     print("  style.css: +mode-small/mode-list +别名/路径/设置行样式")
