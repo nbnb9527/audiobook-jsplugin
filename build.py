@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.37"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.41"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -1269,8 +1269,7 @@ def patch_ui(src: str) -> str:
         p17e_old = ('var kept=base.books.filter(function(b){'
                     'return !(b.folderRelPath&&b.folderRelPath.indexOf(prefix)===0)});')
         p17e_new = ('var kept=base.books.filter(function(b){var bp=b.folderRelPath||"";'
-                    'if(b.virt&&(bp===full||bp.indexOf(prefix)===0))return !1;'
-                    'return !(bp&&bp.indexOf(prefix)===0)});')
+                    'return !(bp===full||bp.indexOf(prefix)===0)});')
         assert src.count(p17e_old) == 1, "P17e 锚点数量异常"
         src = src.replace(p17e_old, p17e_new)
 
@@ -1970,7 +1969,8 @@ def patch_static(build_dir: str) -> None:
                 + hg4a_old)
     html = rep(html, hg4a_old, hg4a_new, "HG4a")
 
-    # HG4j: 打散合集成员选择弹窗（v1.3.35 —— 可勾选要移出的成员，支持部分打散）
+    # HG4j: 打散合集成员选择弹窗（v1.3.40 恢复；shorts/custom 详情页「打散合集」按钮会打开它；
+    #       pack 不显示按钮，故不会触发。弹窗元素 id 与 J46 的 handler 一一对应）。
     hg4j_old = '    <!-- 删除确认弹窗 -->\n'
     hg4j_new = ('    <!-- 打散合集成员选择弹窗 -->\n'
                 '    <div id="scOverlay" class="edit-overlay" hidden>\n'
@@ -2031,7 +2031,12 @@ def patch_static(build_dir: str) -> None:
         #   时只读内存 n.uiPrefs，快照未加载完就一直显示默认值。改为：
         #   ① 打开弹窗主动 GET /api/ui-prefs 拉真实值；② change+input 双事件；
         #   ③ 关闭弹窗/页面隐藏时全量采集比对后保存（不依赖事件是否触发）。
-        'function __setSel(el,v){if(!el)return;el.value=v;if(el.value!==v){for(var i=0;i<el.options.length;i++){if(el.options[i].value===v){el.selectedIndex=i;try{el.options[i].selected=true}catch(_){}break}}}}\n'
+        # v1.3.38：WebF 下给 <select> 赋 .value 有时只改属性不刷新原生下拉，
+        #   这里同时写 selected 属性 + selectedIndex，三保险。
+        'function __setSel(el,v){if(!el)return;var w=String(v);\n'
+        'for(var i=0;i<el.options.length;i++){var o=el.options[i];if(String(o.value)===w){try{o.selected=true;o.setAttribute("selected","")}catch(_){}}else{try{o.selected=false;o.removeAttribute("selected")}catch(_){}}}\n'
+        'try{el.value=w}catch(_){}\n'
+        'if(el.value!==w){for(var j=0;j<el.options.length;j++){if(String(el.options[j].value)===w){try{el.selectedIndex=j;el.options[j].selected=true}catch(_){}break}}}}\n'
         'function __prefIds(){return ["prefViewDesktop","prefViewMobile","prefShortsThreshold","prefInitScan","prefInitScanHours"]}\n'
         'function __prefPatch(el){if(!el)return null;var id=el.id,v=el.value;'
         'if(id==="prefViewDesktop")return{viewDesktop:v||"large"};\n'
@@ -2051,13 +2056,27 @@ def patch_static(build_dir: str) -> None:
         'function __commitPrefs(){var s=window.__prefsSnap;if(!s)return;window.__prefsSnap=null;\n'
         'var c=__collectPrefs(),d={},cnt=0;for(var k in c){if(String(c[k])!==String(s[k])){d[k]=c[k];cnt++}}\n'
         'if(cnt)__savePrefs(d)}\n'
+        # v1.3.38 修复：打开设置时 ①主动 GET /api/ui-prefs 拉服务端真实值；
+        #   ②__syncAllPrefs 回填全部 5 个设置项；③绑定事件；④拍快照供关闭时比对保存。
         'async function __openSettings(){\n'
         'try{var p=await y("/api/ui-prefs");if(p){n.uiPrefs=Object.assign({viewDesktop:"large",viewMobile:"large",shortsMergeThreshold:4,initScanMode:"stale",initScanStaleHours:72},n.uiPrefs||{},p)}}catch(_){}\n'
         'try{__syncViewModeUI()}catch(_){}\n'
+        'try{__syncAllPrefs()}catch(_){}\n'
         'try{__bindPrefEvents()}catch(_){}\n'
         'try{window.__prefsSnap=__collectPrefs()}catch(_){window.__prefsSnap=null}}\n'
         'try{window.addEventListener("pagehide",function(){try{__commitPrefs()}catch(_){}})}catch(_){}\n'
         'try{document.addEventListener("visibilitychange",function(){if(document.visibilityState==="hidden"){try{__commitPrefs()}catch(_){}}})}catch(_){}\n'
+        # v1.3.38 真因修复：原 __syncViewModeUI 只回填 viewMode/prefViewDesktop/prefViewMobile，
+        #   prefShortsThreshold / prefInitScan / prefInitScanHours 三个从来没被赋值（那段只绑事件，
+        #   还被 dataset.boundV 挡住），打开设置永远显示 HTML 第一项（关闭 / 距上次扫描超过阈值才扫 / 空），
+        #   看着像「没保存」。改为统一用 __syncAllPrefs 回填全部 5 项（默认值与后端一致）。
+        'function __syncAllPrefs(){var u=(n&&n.uiPrefs)||{};\n'
+        'var a=document.getElementById("prefViewDesktop");a&&__setSel(a,u.viewDesktop||"large");\n'
+        'var b=document.getElementById("prefViewMobile");b&&__setSel(b,u.viewMobile||"large");\n'
+        'var c=document.getElementById("prefShortsThreshold");c&&__setSel(c,String(u.shortsMergeThreshold==null?4:u.shortsMergeThreshold));\n'
+        'var d=document.getElementById("prefInitScan");d&&__setSel(d,u.initScanMode||"stale");\n'
+        'var e=document.getElementById("prefInitScanHours");if(e)e.value=String(u.initScanStaleHours||72);\n'
+        'var f=document.getElementById("viewMode");f&&(f.value=__getViewMode())}\n'
         "function __syncViewModeUI(){let s=document.getElementById(\"viewMode\");s&&(s.value=__getViewMode());let pd=document.getElementById(\"prefViewDesktop\");pd&&__setSel(pd,n.uiPrefs&&n.uiPrefs.viewDesktop||\"large\");let pm=document.getElementById(\"prefViewMobile\");pm&&__setSel(pm,n.uiPrefs&&n.uiPrefs.viewMobile||\"large\");let pt=document.getElementById(\"prefShortsThreshold\");pt&&!pt.dataset.boundV&&(pt.dataset.boundV=\"1\",pt.addEventListener(\"change\",async()=>{let v=parseInt(pt.value,10)||0;await __savePrefs({shortsMergeThreshold:v});u(v>0?\"\\u5DF2\\u4FDD\\u5B58\\uFF1A\\u9608\\u503C \\u2264\"+v+\" \\u7AE0\\u3002\\u4E0D\\u4F1A\\u81EA\\u52A8\\u626B\\u63CF\\uFF0C\\u70B9\\u300C\\u91CD\\u65B0\\u626B\\u63CF\\u300D\\u5E76\\u9009\\u300C\\u4EC5\\u91CD\\u5EFA\\u5408\\u96C6\\u300D\\u5373\\u53EF\\u751F\\u6548\":\"\\u5DF2\\u5173\\u95ED\\u77ED\\u7BC7\\u5408\\u5E76\\uFF0C\\u70B9\\u300C\\u91CD\\u65B0\\u626B\\u63CF\\u300D\\u5E76\\u9009\\u300C\\u4EC5\\u91CD\\u5EFA\\u5408\\u96C6\\u300D\\u5373\\u53EF\\u89E3\\u6563\\u73B0\\u6709\\u5408\\u96C6\")}));let ip=document.getElementById(\"prefInitScan\");ip&&!ip.dataset.boundV&&(ip.dataset.boundV=\"1\",ip.addEventListener(\"change\",()=>__savePrefs({initScanMode:ip.value})));let hp=document.getElementById(\"prefInitScanHours\");hp&&!hp.dataset.boundV&&(hp.dataset.boundV=\"1\",hp.addEventListener(\"change\",()=>{let v=parseInt(hp.value,10);if(!v||v<1)v=72;hp.value=String(v);__savePrefs({initScanStaleHours:v})}));let cp=document.getElementById(\"editCopyPath\");cp&&!cp.dataset.boundV&&(cp.dataset.boundV=\"1\",cp.addEventListener(\"click\",async()=>{let v=document.getElementById(\"editBookPath\").value||\"\";try{await navigator.clipboard.writeText(v),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(e){let i=document.getElementById(\"editBookPath\");i.focus(),i.select();try{document.execCommand(\"copy\"),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(_){u(\"\\u590D\\u5236\\u5931\\u8D25\\uFF0C\\u8BF7\\u624B\\u52A8\\u9009\\u62E9\\u590D\\u5236\")}}}));try{let mq=window.matchMedia(\"(max-width:768px)\"),h=()=>{__syncViewModeUI(),fe()};mq.addEventListener?mq.addEventListener(\"change\",h):mq.addListener(h)}catch(_){}}\n"
         "async function __savePrefs(p){n.uiPrefs=Object.assign({viewDesktop:\"large\",viewMobile:\"large\"},n.uiPrefs||{},p);if(p.viewDesktop&&!__isMobile()){try{localStorage.removeItem(\"ab_view_desktop\")}catch(_){}}if(p.viewMobile&&__isMobile()){try{localStorage.removeItem(\"ab_view_mobile\")}catch(_){}}__syncViewModeUI(),fe();try{await y(\"/api/ui-prefs\",{method:\"PUT\",body:JSON.stringify(p),headers:{\"Content-Type\":\"application/json\"}})}catch(e){u(\"\\u4FDD\\u5B58\\u663E\\u793A\\u8BBE\\u7F6E\\u5931\\u8D25\\uFF1A\"+e.message)}}\n"
         "function __relPath(p){if(!p)return\"\";let lp=String(n.libraryPath||\"/app/audiobook\").replace(/\\/+$/,\"\");return p===lp?\"\":p.indexOf(lp+\"/\")===0?p.substring(lp.length+1):p}\n"
@@ -2533,7 +2552,8 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                '          ' + j45_old)
     js = rep(js, j45_old, j45_new, "J45")
 
-    # J46: 绑定详情页「重新扫描」按钮；「打散合集」改为弹出成员选择弹窗（v1.3.35 部分打散）
+    # J46: 绑定详情页「重新扫描」按钮 + 「打散合集」按钮点击逻辑。
+    #       v1.3.40 恢复打散功能（shorts/custom 显示按钮；pack 不显示 → 此 handler 对 pack 不会触发）。
     j46_old = 'document.getElementById("btnRefreshBook").addEventListener("click",()=>{R(e.id)}),'
     j46_new = ('document.getElementById("btnRescanBook").addEventListener("click",()=>{__rescanBook(e)}),'
                'document.getElementById("btnScatterCol").onclick=async()=>{'
@@ -2579,19 +2599,18 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                + j46_old)
     js = rep(js, j46_old, j46_new, "J46")
 
-    # JG4h: 详情页按钮 —— 「重新扫描」对纯虚拟合集隐藏（无对应目录，misc 未分类目录书保留）；
-    #       新增「打散合集」按钮（仅 shorts/custom/pack 显示，misc 不显示）。
-    #       注意必须替换「完整按钮元素」——只换开始标签会把打散按钮嵌进重扫按钮内部，
-    #       HTML 不允许嵌套 button，浏览器解析器会把外层截成空壳、内层错位（v1.3.33 空白按钮 bug）。
+    # JG4h: 详情页按钮 —— 「重新扫描」对纯虚拟合集隐藏（无对应目录，misc 未分类目录书保留）。
+    #       v1.3.40 恢复「打散合集」按钮，但**仅 shorts(自动合集)/custom(自定义合集)** 显示；
+    #       pack(合集包) 不显示 —— 合集包不删除原书，无需解散功能（用户要求）。
     jg4h_old = ('<button class="btn btn-ghost" id="btnRescanBook" title="\\u91CD\\u65B0\\u626B\\u63CF\\u8BE5\\u4E66\\u76EE\\u5F55">'
                 '\\u{1F504} \\u91CD\\u65B0\\u626B\\u63CF</button>')
     jg4h_new = ('<button class="btn btn-ghost" id="btnRescanBook" title="\\u91CD\\u65B0\\u626B\\u63CF\\u8BE5\\u4E66\\u76EE\\u5F55"'
-                '${e.virt&&e.virt!=="misc"?" hidden":""}>\\u{1F504} \\u91CD\\u65B0\\u626B\\u63CF</button>\n'
+                '${e.virt&&e.virt!=="misc"?" hidden":""}>\\u{1F504} \\u91CD\\u65B0\\u626B\\u63CF</button>\\n'
                 '          <button class="btn btn-ghost" id="btnScatterCol" '
                 'title="${e.virt==="shorts"?' + _qs("打散自动合集：这些书不再被自动合并（不删除文件）")
                 + ':e.virt==="pack"?' + _qs("移除连播清单：原书不受影响（不删除文件）")
                 + ':' + _qs("打散合集：成员书恢复显示（不删除文件）") + '}"'
-                '${(e.virt==="shorts"||e.virt==="custom"||e.virt==="pack")?"":" hidden"}>\\u6253\\u6563\\u5408\\u96C6</button>')
+                '${(e.virt==="shorts"||e.virt==="custom")?"":" hidden"}>\\u6253\\u6563\\u5408\\u96C6</button>')
     js = rep(js, jg4h_old, jg4h_new, "JG4h")
 
     # J32a: 详情页暂停/倍速按钮的状态同步函数（追加到 cycleSpeed 之后，IIFE 顶层可用）
@@ -3017,7 +3036,26 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         ".sc-item input { display: inline-block; vertical-align: middle; width: 16px; height: 16px; margin: 0 8px 0 0; flex: none; }\n"
         ".sc-item span { display: inline-block; vertical-align: middle; max-width: calc(100% - 28px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n")
     open(css_path, "w", encoding="utf-8", newline="").write(css)
-    open(css_path, "w", encoding="utf-8", newline="").write(css)
+
+    # HC: 静态资源 cache-busting（v1.3.37）
+    #     app.bundle / style 的文件名继承自原包基线，内容改了文件名也不变，
+    #     宿主 WebF 会一直用缓存的旧文件 —— 这是「改了前端但用户端不生效」的元凶。
+    #     实测宿主静态资源路由忽略查询参数（?v=xxx 仍返回正确内容），故按最终内容
+    #     算短哈希追加到引用 URL 上强制刷新缓存。
+    import hashlib as _hashlib
+    def _vh(p):
+        try:
+            with open(p, "rb") as _f:
+                return _hashlib.sha256(_f.read()).hexdigest()[:10]
+        except Exception:
+            return PLUGIN_VERSION
+    _h = open(html_path, encoding="utf-8").read()
+    _jsn = os.path.basename(js_path)
+    _cssn = os.path.basename(css_path)
+    _q = chr(34)
+    _h = _h.replace("static/js/" + _jsn + _q, "static/js/" + _jsn + "?v=" + _vh(js_path) + _q)
+    _h = _h.replace("static/css/" + _cssn + _q, "static/css/" + _cssn + "?v=" + _vh(css_path) + _q)
+    open(html_path, "w", encoding="utf-8", newline="").write(_h)
     print("  style.css: +mode-small/mode-list +别名/路径/设置行样式")
 
 
