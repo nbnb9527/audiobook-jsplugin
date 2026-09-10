@@ -677,6 +677,17 @@ def patch_ui(src: str) -> str:
                          # 诊断：查看/清理自动合集忽略名单（打散自动合集后可恢复）
                          # GET  → {ignoredShortsMembers:[...]}
                          # POST {action:"clear"} 清空；{action:"remove",ids:[...]} 移除指定成员
+                         # 诊断：列出增量扫描分片缓存（.cache/abscan）状态
+                         's.get("/api/debug/shards",async()=>{'
+                         'var out=[];'
+                         'try{var es=await songloft.fs.readdir(__SHD)||[];'
+                         'for(var i=0;i<es.length;i++){if(es[i].isDir)continue;'
+                         'try{var j=JSON.parse(await songloft.fs.readFile(__SHD+"/"+es[i].name));'
+                         'out.push({name:es[i].name,v:j&&j.v,g:j&&j.g,items:j&&j.items?j.items.length:0,'
+                         'misc:j&&j.items?j.items.filter(function(x){return x&&x.rel&&x.rel.indexOf("/__misc__")>=0}).length:0,'
+                         'ts:j&&j.ts})}catch(e){out.push({name:es[i].name,err:String(e)})}}}catch(e){'
+                         'return f({success:!0,data:{dirMissing:!0,err:String(e),shards:out}})}'
+                         'return f({success:!0,data:{count:out.length,shards:out}})}),'
                          's.get("/api/debug/ignore-list",async()=>{'
                          'return f({success:!0,data:{ignoredShortsMembers:'
                          '(t.settings.ignoredShortsMembers||[])}})}),'
@@ -1114,7 +1125,7 @@ def patch_ui(src: str) -> str:
                     'return out}'
                     'async function __shSave(g,items){'
                     'try{await songloft.fs.mkdir(__SHD,{recursive:!0})}catch(_){}'
-                    'try{await songloft.fs.writeFile(__SHD+"/"+ct(g)+".json",JSON.stringify({g:g,ts:Date.now(),items:items||[]}))}catch(_){}}'
+                    'try{await songloft.fs.writeFile(__SHD+"/"+ct(g)+".json",JSON.stringify({g:g,ts:Date.now(),v:2,items:items||[]}))}catch(_){}}'
                     # 快通道：整组的目录 mtime 全部未变 → 整组直接复用，连目录遍历都省掉
                     'async function __shFast(g,s){'
                     'if(__SH_FORCE)return null;'
@@ -1123,7 +1134,7 @@ def patch_ui(src: str) -> str:
                     'if(!list.length)return null;'
                     'for(var i=0;i<list.length;i+=16){var b=list.slice(i,i+16);'
                     'var rs=await Promise.all(b.map(async it=>{'
-                    'try{var st=await songloft.fs.stat(it.rel?s+"/"+it.rel:s);return Number((st&&st.modTime)||0)}'
+                    'try{var __rp=(it.rel||"").replace(__SH_ME,"");var st=await songloft.fs.stat(__rp?s+"/"+__rp:s);return Number((st&&st.modTime)||0)}'
                     'catch(e){return -1}}));'
                     'for(var j=0;j<b.length;j++){var mv=rs[j];'
                     'if(!mv||mv!==b[j].mt){__SCANP.fastProbe=String(b[j].rel)+" exp"+b[j].mt+" act"+mv;return null}}}'
