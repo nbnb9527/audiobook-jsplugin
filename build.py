@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.34"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.35"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -1455,19 +1455,39 @@ def patch_ui(src: str) -> str:
             'await t.saveSettings();__CUSTOM_MERGE(t,t.settings);'
             'try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
             'return f({success:!0,data:{id:cid,scatter:!0}})}),'
+            's.get("/api/books/:id/members",async(o,e)=>{var bk=null;'
+            'for(var z=0;z<t.books.length;z++)if(t.books[z].id===e.id){bk=t.books[z];break}'
+            'if(!bk||!bk.virt)return h("' + _u("仅合集可打散") + '",400);'
+            'var ms=[],ma=bk.memberIds||[];'
+            'for(var q=0;q<ma.length;q++){var b2=null;'
+            'for(var z2=0;z2<t.books.length;z2++)if(t.books[z2].id===ma[q]){b2=t.books[z2];break}'
+            'ms.push({id:ma[q],title:(b2&&b2.title)||ma[q]})}'
+            'return f({success:!0,data:{id:bk.id,virt:bk.virt,title:bk.title,members:ms}})}),'
             's.post("/api/books/:id/scatter",async(o,e)=>{var bk=null;'
             'for(var z=0;z<t.books.length;z++)if(t.books[z].id===e.id){bk=t.books[z];break}'
             'if(!bk||!bk.virt)return h("' + _u("仅合集可打散") + '",400);'
+            'var body={};try{body=typeof o.body=="string"?JSON.parse(o.body):o.body||{}}catch(_){}'
+            'var sel=(body.ids||[]).map(String),n0=(bk.memberIds||[]).length;'
             'if(bk.virt==="shorts"){'
             'var ig=t.settings.ignoredShortsMembers||(t.settings.ignoredShortsMembers=[]);'
-            'var mm=bk.memberIds||[];for(var q=0;q<mm.length;q++)if(ig.indexOf(mm[q])<0)ig.push(mm[q]);'
+            'var mm=sel.length?sel:(bk.memberIds||[]);'
+            'for(var q2=0;q2<mm.length;q2++)if(ig.indexOf(mm[q2])<0)ig.push(mm[q2]);'
             'await t.saveSettings();__SHORTS_MERGE(t),__CUSTOM_MERGE(t,t.settings);}'
-            'else{var cid2=String(e.id).replace(/^__(?:custom|pack)_/,"");'
+            'else{var cid2=String(e.id).replace(/^__(?:custom|pack)_/,""),cf=null,cl2=null;'
+            'if(sel.length){cl2=bk.virt==="custom"?t.settings.customCollections:t.settings.collectionPacks;'
+            'for(var z3=0;z3<cl2.length;z3++)if(cl2[z3].id===cid2){cf=cl2[z3];break}}'
+            'if(cf){cf.memberIds=(cf.memberIds||[]).filter(function(x){return sel.indexOf(x)<0});'
+            'if(!cf.memberIds.length){'
+            'if(bk.virt==="custom")t.settings.customCollections=t.settings.customCollections.filter(function(c){return c.id!==cid2});'
+            'else t.settings.collectionPacks=t.settings.collectionPacks.filter(function(c){return c.id!==cid2})}}'
+            'else if(!sel.length){'
             't.settings.customCollections=(t.settings.customCollections||[]).filter(function(c){return c.id!==cid2});'
-            't.settings.collectionPacks=(t.settings.collectionPacks||[]).filter(function(c){return c.id!==cid2});'
+            't.settings.collectionPacks=(t.settings.collectionPacks||[]).filter(function(c){return c.id!==cid2})}'
             'await t.saveSettings();__SHORTS_MERGE(t),__CUSTOM_MERGE(t,t.settings);}'
             'try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
-            'return f({success:!0,data:{id:e.id,scatter:!0,virt:bk.virt}})}),')
+            'var bk2=null;for(var z4=0;z4<t.books.length;z4++)if(t.books[z4].id===e.id){bk2=t.books[z4];break}'
+            'return f({success:!0,data:{id:e.id,scatter:!0,virt:bk.virt,partial:sel.length>0,'
+            'removed:sel.length?sel.length:n0,remaining:bk2?(bk2.memberIds||[]).length:0,gone:!bk2}})}),')
         assert src.count(g4g_old) == 1, "G4g 锚点数量异常"
         src = src.replace(g4g_old, g4g_new)
 
@@ -1905,7 +1925,8 @@ def patch_static(build_dir: str) -> None:
                 + hg3c_old)
     html = rep(html, hg3c_old, hg3c_new, "HG3c")
 
-    # HG4a: 新建合集/合集包弹窗（第四组）
+    # HG4a: 新建合集/合集包弹窗（第四组；v1.3.35 移除类型下拉——点哪个按钮固定创建哪种，
+    #       弹窗只显示对应类型的说明文字）
     hg4a_old = '    <!-- 删除确认弹窗 -->\n'
     hg4a_new = ('    <!-- 新建合集/合集包弹窗 -->\n'
                 '    <div id="colOverlay" class="edit-overlay" hidden>\n'
@@ -1915,14 +1936,7 @@ def patch_static(build_dir: str) -> None:
                 '          <label for="colName">名称</label>\n'
                 '          <input type="text" id="colName" placeholder="如：睡前故事" />\n'
                 '        </div>\n'
-                '        <div class="edit-field">\n'
-                '          <label for="colType">类型</label>\n'
-                '          <select id="colType">\n'
-                '            <option value="collection">书籍合集（成员书隐藏，作为一个合集显示）</option>\n'
-                '            <option value="pack">连播合集包（类似播放列表，按顺序连播，原书正常显示）</option>\n'
-                '          </select>\n'
-                '          <div class="col-hint" id="colHint"></div>\n'
-                '        </div>\n'
+                '        <div class="col-hint" id="colHint"></div>\n'
                 '        <div class="edit-actions">\n'
                 '          <button class="btn btn-ghost" id="colCancel" type="button">取消</button>\n'
                 '          <button class="btn btn-primary" id="colCreate" type="button">创建</button>\n'
@@ -1932,7 +1946,31 @@ def patch_static(build_dir: str) -> None:
                 + hg4a_old)
     html = rep(html, hg4a_old, hg4a_new, "HG4a")
 
+    # HG4j: 打散合集成员选择弹窗（v1.3.35 —— 可勾选要移出的成员，支持部分打散）
+    hg4j_old = '    <!-- 删除确认弹窗 -->\n'
+    hg4j_new = ('    <!-- 打散合集成员选择弹窗 -->\n'
+                '    <div id="scOverlay" class="edit-overlay" hidden>\n'
+                '      <div class="edit-modal">\n'
+                '        <h3 id="scTitle">打散合集</h3>\n'
+                '        <div class="col-hint" id="scHint"></div>\n'
+                '        <div class="edit-field">\n'
+                '          <div class="sc-head">\n'
+                '            <label style="margin:0">选择要移出的成员（不勾选直接确认 = 打散整个合集）</label>\n'
+                '            <button class="btn btn-ghost" id="scToggleAll" type="button">全不选</button>\n'
+                '          </div>\n'
+                '          <div id="scList" class="sc-list"></div>\n'
+                '        </div>\n'
+                '        <div class="edit-actions">\n'
+                '          <button class="btn btn-ghost" id="scCancel" type="button">取消</button>\n'
+                '          <button class="btn btn-primary" id="scConfirm" type="button">打散选中成员</button>\n'
+                '        </div>\n'
+                '      </div>\n'
+                '    </div>\n'
+                + hg4j_old)
+    html = rep(html, hg4j_old, hg4j_new, "HG4j")
+
     # HG4b: 主页筛选下拉（全部/收藏/自动合集/自定义合集/合集包）
+    #       v1.3.35：同时删除「只看收藏」复选框——筛选下拉已含「收藏」选项，二者重复
     hg4b_old = ('      <label class="fav-toggle">\n'
                 '        <input type="checkbox" id="favoritesOnly" />\n'
                 '        只看收藏\n'
@@ -1946,8 +1984,7 @@ def patch_static(build_dir: str) -> None:
                 '          <option value="custom">自定义合集</option>\n'
                 '          <option value="pack">合集包</option>\n'
                 '        </select>\n'
-                '      </label>\n'
-                + hg4b_old)
+                '      </label>\n')
     html = rep(html, hg4b_old, hg4b_new, "HG4b")
 
     open(html_path, "w", encoding="utf-8", newline="").write(html)
@@ -2304,9 +2341,12 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
 
     # JG4a: viewMode 下拉 change 绑定 + 初始同步 —— v1.3.11「接线」补丁只加了
     # __getViewMode/__setViewMode/__syncViewModeUI 函数，但漏了给下拉绑 change 事件，
-    # 导致「显示方式」切到大图标/小图标/列表都不生效（v1.3.29 修复）
-    jg4a_old = ('document.getElementById("favoritesOnly").addEventListener("change",()=>{n.page=1,w()}),')
-    jg4a_new = (jg4a_old +
+    # 导致「显示方式」切到大图标/小图标/列表都不生效（v1.3.29 修复）。
+    # v1.3.35：favoritesOnly 复选框已从 HTML 移除（筛选下拉的「收藏」替代），
+    # 原绑定无空值保护会抛错断链，改为安全绑定。
+    jg4a_old = 'document.getElementById("favoritesOnly").addEventListener("change",()=>{n.page=1,w()}),'
+    jg4a_new = ('var __fo=document.getElementById("favoritesOnly");'
+                '__fo&&__fo.addEventListener("change",()=>{n.page=1,w()}),'
                 'document.getElementById("viewMode").addEventListener("change",'
                 '()=>{let v=document.getElementById("viewMode").value||"large";__setViewMode(v),fe()}),'
                 'function(){try{__syncViewModeUI()}catch(_){}}(),')
@@ -2326,42 +2366,43 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                 'document.getElementById("libFilter").addEventListener("change",()=>{n.page=1,w()}),')
     js = rep(js, jg4c_old, jg4c_new, "JG4c")
 
-    # JG4d: __msBindBar 里加「存为合集」弹窗逻辑
+    # JG4d: __msBindBar 里加「存为合集」弹窗逻辑（v1.3.35：无类型下拉，
+    #       两个按钮各自固定类型，弹窗仅展示对应说明）
     jg4d_old = ('let ov=document.getElementById("batchEditOverlay");'
                 'ov&&ov.addEventListener("click",e=>{e.target===e.currentTarget&&(e.currentTarget.hidden=!0)})}')
-    jg4d_new = ('function __colHint(){let ct2=document.getElementById("colType"),oh=document.getElementById("colHint");'
-                'if(!ct2||!oh)return;'
-                'oh.textContent=ct2.value==="pack"'
+    jg4d_new = ('function __colHint(){var ty=window.__colType||"collection",'
+                'oh=document.getElementById("colHint");if(!oh)return;'
+                'oh.textContent=ty==="pack"'
                 '?'+_qs("连播合集包：选中的书按勾选顺序排成连续章节连播，原书仍正常显示，可随时移除。")+
                 ':'+_qs("书籍合集：选中的书组成一个合集整体显示，成员书隐藏，可随时打散恢复。")+'}'
                 'let sc=document.getElementById("msSaveCol");'
                 'sc&&sc.addEventListener("click",()=>{'
                 'if(!window.__sel.size){u("\\u8bf7\\u5148\\u52fe\\u9009\\u4e66\\u7c4d");return}'
+                'window.__colType="collection";'
                 'let cn=document.getElementById("colName");cn&&(cn.value="");'
-                'let ct2=document.getElementById("colType");ct2&&(ct2.value="collection");'
                 '__colHint();'
                 'let tt=document.getElementById("colTitle");tt&&(tt.textContent="' + _u("存为合集") + '");'
+                'let cb=document.getElementById("colCreate");cb&&(cb.textContent="' + _u("创建合集") + '");'
                 'let ov2=document.getElementById("colOverlay");ov2&&(ov2.hidden=!1)});'
                 'let sp=document.getElementById("msSavePack");'
                 'sp&&sp.addEventListener("click",()=>{'
                 'if(!window.__sel.size){u("\\u8bf7\\u5148\\u52fe\\u9009\\u4e66\\u7c4d");return}'
+                'window.__colType="pack";'
                 'let cn=document.getElementById("colName");cn&&(cn.value="");'
-                'let ct2=document.getElementById("colType");ct2&&(ct2.value="pack");'
                 '__colHint();'
                 'let tt=document.getElementById("colTitle");tt&&(tt.textContent="' + _u("创建合集包") + '");'
+                'let cb=document.getElementById("colCreate");cb&&(cb.textContent="' + _u("创建合集包") + '");'
                 'let ov2=document.getElementById("colOverlay");ov2&&(ov2.hidden=!1)});'
-                'let ct0=document.getElementById("colType");'
-                'ct0&&ct0.addEventListener("change",__colHint);'
                 'let cc=document.getElementById("colCancel");'
                 'cc&&cc.addEventListener("click",()=>{let o3=document.getElementById("colOverlay");o3&&(o3.hidden=!0)});'
                 'let cx=document.getElementById("colOverlay");'
                 'cx&&cx.addEventListener("click",e=>{e.target===e.currentTarget&&(e.currentTarget.hidden=!0)});'
                 'let cr=document.getElementById("colCreate");'
                 'cr&&cr.addEventListener("click",async()=>{'
-                'let cn=document.getElementById("colName"),ct3=document.getElementById("colType"),o4=document.getElementById("colOverlay");'
+                'let cn=document.getElementById("colName"),o4=document.getElementById("colOverlay");'
                 'let name=cn?cn.value.trim():"";'
                 'if(!name){u("\\u8bf7\\u586b\\u5199\\u540d\\u79f0");return}'
-                'let type=ct3?ct3.value:"collection",ids=Array.from(window.__sel);'
+                'let type=window.__colType||"collection",ids=Array.from(window.__sel);'
                 'try{await y("/api/collections",{method:"POST",body:JSON.stringify({name:name,type:type,ids:ids})});'
                 'u(type==="pack"?' + _qs("连播清单「") + '+name+' + _qs("」已创建，可在主页筛选「合集包」中找到") + ':' + _qs("合集「") + '+name+' + _qs("」已创建") + ');'
                 'o4&&(o4.hidden=!0);__msSetMode(!1),await w()}catch(e){u("\\u521b\\u5efa\\u5931\\u8d25\\uff1a"+e.message)}});'
@@ -2425,14 +2466,49 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                '          ' + j45_old)
     js = rep(js, j45_old, j45_new, "J45")
 
-    # J46: 绑定详情页「重新扫描」按钮
+    # J46: 绑定详情页「重新扫描」按钮；「打散合集」改为弹出成员选择弹窗（v1.3.35 部分打散）
     j46_old = 'document.getElementById("btnRefreshBook").addEventListener("click",()=>{R(e.id)}),'
     j46_new = ('document.getElementById("btnRescanBook").addEventListener("click",()=>{__rescanBook(e)}),'
-               'document.getElementById("btnScatterCol").addEventListener("click",async()=>{'
-               'try{await y("/api/books/"+encodeURIComponent(e.id)+"/scatter",'
-               '{method:"POST",body:"{}",headers:{"Content-Type":"application/json"}});'
-               'u("' + _u("已打散，成员书籍已恢复显示") + '");k("homeView");'
-               'try{await w()}catch(_){}}catch(err){u("' + _u("打散失败：") + '"+err.message)}}),'
+               'document.getElementById("btnScatterCol").onclick=async()=>{'
+               'window.__scBook=e;'
+               'var lb=document.getElementById("scList"),oh=document.getElementById("scHint"),'
+               'ol=document.getElementById("scOverlay");if(!lb||!ol)return;lb.innerHTML="";'
+               'oh.textContent=e.virt==="shorts"?'
+               + _qs("勾选要移出的短篇；移出后这些书不再被自动合并，全部移出则合集消失。")
+               + ':e.virt==="pack"?'
+               + _qs("勾选要从连播清单中移出的书；全部移出则清单自动删除。不勾选直接确认 = 移除整个清单。")
+               + ':'
+               + _qs("勾选要从合集中移出的书；全部移出则合集自动删除。不勾选直接确认 = 打散整个合集。") + ';'
+               'try{var r=await y("/api/books/"+encodeURIComponent(e.id)+"/members");'
+               '(r.members||[]).forEach(function(m){'
+               'var it=document.createElement("label");it.className="sc-item";'
+               'var cb=document.createElement("input");cb.type="checkbox";cb.value=m.id;cb.checked=!0;'
+               'var sp=document.createElement("span");sp.textContent=m.title;'
+               'it.appendChild(cb);it.appendChild(sp);lb.appendChild(it)});'
+               'var ta=document.getElementById("scToggleAll");ta&&(ta.textContent="\\u5168\\u4E0D\\u9009");'
+               'ol.hidden=!1}catch(err){u("' + _u("加载成员失败：") + '"+err.message)}};'
+               'var scC=document.getElementById("scConfirm");'
+               'scC&&(scC.onclick=async()=>{'
+               'var b=window.__scBook;if(!b)return;'
+               'var ids=[];document.querySelectorAll("#scList input[type=checkbox]")'
+               '.forEach(function(x){x.checked&&ids.push(x.value)});'
+               'try{var r=await y("/api/books/"+encodeURIComponent(b.id)+"/scatter",'
+               '{method:"POST",body:JSON.stringify({ids:ids}),headers:{"Content-Type":"application/json"}});'
+               'var o5=document.getElementById("scOverlay");o5&&(o5.hidden=!0);'
+               'u(r.gone?'
+               + _qs("已打散「") + '+String(b.title||"")+' + _qs("」")
+               + ':'
+               + _qs("已移出 ") + '+r.removed+' + _qs(" 个成员，「") + '+String(b.title||"")+' + _qs("」还剩 ") + '+r.remaining+' + _qs(" 个成员") + ');'
+               'k("homeView");try{await w()}catch(_){}}catch(err){u("' + _u("打散失败：") + '"+err.message)}});'
+               'var scX=document.getElementById("scCancel");'
+               'scX&&(scX.onclick=()=>{var o6=document.getElementById("scOverlay");o6&&(o6.hidden=!0)});'
+               'var scT=document.getElementById("scToggleAll");'
+               'scT&&(scT.onclick=()=>{var bs=document.querySelectorAll("#scList input[type=checkbox]");'
+               'var all=bs.length&&Array.prototype.every.call(bs,function(x){return x.checked});'
+               'Array.prototype.forEach.call(bs,function(x){x.checked=!all});'
+               'scT.textContent=all?"\\u5168\\u9009":"\\u5168\\u4E0D\\u9009"});'
+               'var scO=document.getElementById("scOverlay");'
+               'scO&&(scO.onclick=ev=>{ev.target===ev.currentTarget&&(ev.currentTarget.hidden=!0)});'
                + j46_old)
     js = rep(js, j46_old, j46_new, "J46")
 
@@ -2836,7 +2912,15 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         # ---- v1.3.29 修复：重新扫描弹窗加宽（默认 .edit-modal 480px / .delete-modal 420px 放不下目录树）----
         "#rescanOverlay .edit-modal { max-width: 880px; width: 94%; }\n"
         # ---- v1.3.32 第四组：合集弹窗提示 ----
-        ".col-hint { font-size: 12px; color: var(--text-3); margin-top: 6px; }\n")
+        ".col-hint { font-size: 12px; color: var(--text-3); margin-top: 6px; }\n"
+        # ---- v1.3.35 打散合集成员选择弹窗 ----
+        ".sc-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }\n"
+        ".sc-head label { font-size: 13px; color: var(--text-2); }\n"
+        ".sc-head .btn { padding: 2px 10px; font-size: 12px; }\n"
+        ".sc-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 10px; }\n"
+        ".sc-item { display: flex; align-items: center; gap: 8px; padding: 5px 0; cursor: pointer; font-size: 13px; color: var(--text); }\n"
+        ".sc-item input { flex: none; }\n"
+        ".sc-item span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n")
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     print("  style.css: +mode-small/mode-list +别名/路径/设置行样式")
