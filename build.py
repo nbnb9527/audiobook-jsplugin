@@ -2964,17 +2964,18 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         ".edit-field .sc-head .btn, .sc-head .btn { flex: none !important; margin: 0 !important; padding: 2px 10px !important; font-size: 12px !important; line-height: 1.4 !important; }\n"
         ".edit-field .sc-tip, .sc-tip { display: block; font-size: 12px; font-weight: 400; color: var(--text-3); margin: 0 0 6px; line-height: 1.4; }\n"
         ".sc-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 10px; }\n"
-        # v1.3.36 修复(三)：上一步给 `.sc-item` 的 color/font-weight 加了 `!important`，
-        #   结果成员行书名整行不可见（只剩勾选框）。
-        #   根因：本插件跑在宿主 WebF 容器里，`color: var(--text) !important` 的
-        #   `--text` 是两级 var() 链（--text -> --md-on-surface），WebF 对
-        #   `!important` + 嵌套 var() 解析失败 → 颜色无效 → 文字透明不可见。
-        #   改法：不再用 `!important`，改为把选择器提到 (0,2,0) `.sc-list .sc-item`
-        #   来压过 `.edit-field label`(0,1,1)，color/font-weight 保持 v1.3.35 里
-        #   实测可见的原样声明（不覆盖 color，让它沿用可解析的 var(--text)）。
-        ".sc-list .sc-item { display: flex; align-items: center; gap: 8px; margin: 0; padding: 5px 0; cursor: pointer; font-size: 13px; color: var(--text); line-height: 1.4; }\n"
-        ".sc-item input { flex: none; }\n"
-        ".sc-item span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n")
+        # v1.3.36 修复(三/四)：
+        #   上一轮去掉 `!important` 后用户反馈还是没书名，只剩勾选框。
+        #   后端接口返回数据正常（{success,data:{members:[{id,title}]}}，y() 已拆壳），
+        #   标题 "要移出的成员" 颜色正常 → 颜色/变量解析没问题。
+        #   截图中勾选框孤零零在 sc-list 中间，判断是 WebF 对 flex item 子元素
+        #   的宽度/overflow 处理异常：span { flex:1; min-width:0; overflow:hidden }
+        #   可能被压成 0 宽，文字被完全裁剪；flex: none 在 checkbox 上也可能失效。
+        #   改法：成员行放弃 flex 布局，改用 block + inline-block——这是 WebF 里
+        #   最稳的基线布局；input/span 垂直居中对齐，span 用 calc 占剩余宽度。
+        ".sc-list .sc-item { display: block; margin: 0; padding: 5px 0; cursor: pointer; font-size: 13px; color: var(--text); line-height: 1.4; }\n"
+        ".sc-item input { display: inline-block; vertical-align: middle; width: 16px; height: 16px; margin: 0 8px 0 0; flex: none; }\n"
+        ".sc-item span { display: inline-block; vertical-align: middle; max-width: calc(100% - 28px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n")
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     print("  style.css: +mode-small/mode-list +别名/路径/设置行样式")
