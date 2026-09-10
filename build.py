@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.33"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.34"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -2436,15 +2436,19 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                + j46_old)
     js = rep(js, j46_old, j46_new, "J46")
 
-    # JG4h: 详情页按钮 —— 「重新扫描」对所有虚拟合集隐藏（folderRelPath 为空）；
-    #       新增「打散合集」按钮（仅虚拟合集显示）
-    jg4h_old = '<button class="btn btn-ghost" id="btnRescanBook" title="\\u91CD\\u65B0\\u626B\\u63CF\\u8BE5\\u4E66\\u76EE\\u5F55">'
-    jg4h_new = ('<button class="btn btn-ghost" id="btnRescanBook" title="\\u91CD\\u65B0\\u626B\\u63CF\\u8BE5\\u4E66\\u76EE\\u5F55"${e.virt?" hidden":""}>'
-                '<button class="btn btn-ghost" id="btnScatterCol" '
+    # JG4h: 详情页按钮 —— 「重新扫描」对纯虚拟合集隐藏（无对应目录，misc 未分类目录书保留）；
+    #       新增「打散合集」按钮（仅 shorts/custom/pack 显示，misc 不显示）。
+    #       注意必须替换「完整按钮元素」——只换开始标签会把打散按钮嵌进重扫按钮内部，
+    #       HTML 不允许嵌套 button，浏览器解析器会把外层截成空壳、内层错位（v1.3.33 空白按钮 bug）。
+    jg4h_old = ('<button class="btn btn-ghost" id="btnRescanBook" title="\\u91CD\\u65B0\\u626B\\u63CF\\u8BE5\\u4E66\\u76EE\\u5F55">'
+                '\\u{1F504} \\u91CD\\u65B0\\u626B\\u63CF</button>')
+    jg4h_new = ('<button class="btn btn-ghost" id="btnRescanBook" title="\\u91CD\\u65B0\\u626B\\u63CF\\u8BE5\\u4E66\\u76EE\\u5F55"'
+                '${e.virt&&e.virt!=="misc"?" hidden":""}>\\u{1F504} \\u91CD\\u65B0\\u626B\\u63CF</button>\n'
+                '          <button class="btn btn-ghost" id="btnScatterCol" '
                 'title="${e.virt==="shorts"?' + _qs("打散自动合集：这些书不再被自动合并（不删除文件）")
                 + ':e.virt==="pack"?' + _qs("移除连播清单：原书不受影响（不删除文件）")
                 + ':' + _qs("打散合集：成员书恢复显示（不删除文件）") + '}"'
-                '${e.virt?"":" hidden"}>\\u6253\\u6563\\u5408\\u96C6</button>')
+                '${(e.virt==="shorts"||e.virt==="custom"||e.virt==="pack")?"":" hidden"}>\\u6253\\u6563\\u5408\\u96C6</button>')
     js = rep(js, jg4h_old, jg4h_new, "JG4h")
 
     # J32a: 详情页暂停/倍速按钮的状态同步函数（追加到 cycleSpeed 之后，IIFE 顶层可用）
