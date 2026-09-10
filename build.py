@@ -1979,9 +1979,10 @@ def patch_static(build_dir: str) -> None:
                 '        <div class="col-hint" id="scHint"></div>\n'
                 '        <div class="edit-field">\n'
                 '          <div class="sc-head">\n'
-                '            <label style="margin:0">选择要移出的成员（不勾选直接确认 = 打散整个合集）</label>\n'
+                '            <label class="sc-head-title" style="margin:0">要移出的成员</label>\n'
                 '            <button class="btn btn-ghost" id="scToggleAll" type="button">全不选</button>\n'
                 '          </div>\n'
+                '          <div class="sc-tip">不勾选直接确认 = 打散整个合集</div>\n'
                 '          <div id="scList" class="sc-list"></div>\n'
                 '        </div>\n'
                 '        <div class="edit-actions">\n'
@@ -2905,6 +2906,9 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         "  animation: scan-spin 1.2s linear infinite; }\n"
         "@keyframes scan-spin { to { transform: rotate(360deg); } }\n"
         ".scan-pill[hidden] { display: none !important; }\n"
+        # v1.3.36：按钮 hidden 硬化——详情页操作栏按钮（重新扫描/打散合集）依赖 hidden 显隐，
+        # 若被组件库 display 规则或浏览器缓存影响会误显示，这里强制兜底。
+        ".book-hero .btn[hidden], .book-detail .btn[hidden], #bookDetail .btn[hidden] { display: none !important; }\n"
         ".rtree-force { display: block; font-size: 12px; color: var(--text-3); padding: 6px 10px; cursor: pointer; }\n"
         "/* ===== v1.3.27 重新扫描弹窗目录结构说明 + 设置弹窗居中加宽 ===== */\n"
         ".rescan-dirinfo { margin: 0 0 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); overflow: hidden; }\n"
@@ -2948,9 +2952,12 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         # ---- v1.3.32 第四组：合集弹窗提示 ----
         ".col-hint { font-size: 12px; color: var(--text-3); margin-top: 6px; }\n"
         # ---- v1.3.35 打散合集成员选择弹窗 ----
-        ".sc-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }\n"
-        ".sc-head label { font-size: 13px; color: var(--text-2); }\n"
-        ".sc-head .btn { padding: 2px 10px; font-size: 12px; }\n"
+        # v1.3.36 修复：label 作为 flex 子项会被 space-between 挤压导致文字竖排/错行，
+        #   改为一句话标题（flex:1 撑开）+ 独立提示行，按钮 flex:none 不再参与拉伸。
+        ".sc-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 2px; }\n"
+        ".sc-head-title { flex: 1 1 auto; min-width: 0; font-size: 13px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n"
+        ".sc-head .btn { flex: none; padding: 2px 10px; font-size: 12px; }\n"
+        ".sc-tip { font-size: 12px; color: var(--text-3); margin: 0 0 6px; line-height: 1.4; }\n"
         ".sc-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 10px; }\n"
         ".sc-item { display: flex; align-items: center; gap: 8px; padding: 5px 0; cursor: pointer; font-size: 13px; color: var(--text); }\n"
         ".sc-item input { flex: none; }\n"
