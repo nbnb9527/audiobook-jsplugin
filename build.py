@@ -2952,14 +2952,18 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         # ---- v1.3.32 第四组：合集弹窗提示 ----
         ".col-hint { font-size: 12px; color: var(--text-3); margin-top: 6px; }\n"
         # ---- v1.3.35 打散合集成员选择弹窗 ----
-        # v1.3.36 修复：label 作为 flex 子项会被 space-between 挤压导致文字竖排/错行，
-        #   改为一句话标题（flex:1 撑开）+ 独立提示行，按钮 flex:none 不再参与拉伸。
-        ".sc-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 2px; }\n"
-        ".sc-head-title { flex: 1 1 auto; min-width: 0; font-size: 13px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n"
-        ".sc-head .btn { flex: none; padding: 2px 10px; font-size: 12px; }\n"
-        ".sc-tip { font-size: 12px; color: var(--text-3); margin: 0 0 6px; line-height: 1.4; }\n"
+        # v1.3.36 修复：原版 `.edit-field label { display:block; margin-bottom:4px }` 优先级(0,1,1)
+        #   高于 `.sc-head-title`(0,1,0)，会把标题压成块级并加下外边距，在 flex 居中容器里
+        #   垂直错位（与右侧按钮不在一条线）。这里用 `.edit-field .sc-head .sc-head-title`(0,3,0)
+        #   明确覆盖 display/margin/line-height，确保与按钮垂直居中对齐。
+        ".sc-head { display: flex !important; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 2px; }\n"
+        ".edit-field .sc-head .sc-head-title, .sc-head .sc-head-title { display: block !important; flex: 1 1 auto !important; min-width: 0; margin: 0 !important; padding: 0 !important; font-size: 13px !important; font-weight: 400 !important; line-height: 1.4 !important; color: var(--text-2) !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n"
+        ".edit-field .sc-head .btn, .sc-head .btn { flex: none !important; margin: 0 !important; padding: 2px 10px !important; font-size: 12px !important; line-height: 1.4 !important; }\n"
+        ".edit-field .sc-tip, .sc-tip { display: block; font-size: 12px; font-weight: 400; color: var(--text-3); margin: 0 0 6px; line-height: 1.4; }\n"
         ".sc-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 10px; }\n"
-        ".sc-item { display: flex; align-items: center; gap: 8px; padding: 5px 0; cursor: pointer; font-size: 13px; color: var(--text); }\n"
+        # v1.3.36：`.edit-field label`(0,1,1) 优先级高于 `.sc-item`(0,1,0)，会破坏成员行的
+        #   flex 布局并加上 4px 下边距，这里提到 (0,2,0) 明确覆盖。
+        ".edit-field .sc-list .sc-item, .sc-list .sc-item { display: flex !important; align-items: center !important; gap: 8px !important; margin: 0 !important; padding: 5px 0 !important; cursor: pointer; font-size: 13px; font-weight: 400 !important; color: var(--text) !important; line-height: 1.4 !important; }\n"
         ".sc-item input { flex: none; }\n"
         ".sc-item span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n")
     open(css_path, "w", encoding="utf-8", newline="").write(css)
