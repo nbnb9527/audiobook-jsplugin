@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.27"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.28"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -493,6 +493,123 @@ def patch_ui(src: str) -> str:
             'return rm}')
         assert src.count(p8i_old) == 1, "P8i 锚点数量异常"
         src = src.replace(p8i_old, p8i_new)
+
+    # P8k: 批量编辑覆盖层（第三组）—— settings.bookEdits 按 id 存 description/category/tags/author
+    #   覆盖值，不改扫描数据不写 metadata.json，重扫不丢；「重设」=删除覆盖键回落扫描值。
+    #   __BK_EDITS(s,b) 返回覆盖字段对象（无覆盖返回 null，调用方 ...(x||{}) 展开）。
+    if not globals().get("SKIP_P8K", False):
+        p8k_old = 'var K="audiobook_settings_v1"'
+        p8k_new = ('function __BK_EDITS(s,b){var e=(s.bookEdits||{})[b.id];'
+                   'return e?{description:e.description!=null?e.description:b.description,'
+                   'category:e.category!=null?e.category:b.category,'
+                   'tags:e.tags!=null?e.tags:b.tags,'
+                   'author:e.author!=null?e.author:b.author}:null}\n'
+                   'var K="audiobook_settings_v1"')
+        assert src.count(p8k_old) == 1, "P8k 锚点数量异常"
+        src = src.replace(p8k_old, p8k_new)
+
+        # __MS 深合并补 bookEdits 键（旧存量 settings 升级）
+        p8k_ms_old = 'playbackRates:Object.assign({},a&&a.playbackRates,b.playbackRates)})}'
+        p8k_ms_new = ('playbackRates:Object.assign({},a&&a.playbackRates,b.playbackRates),'
+                      'bookEdits:Object.assign({},a&&a.bookEdits,b.bookEdits)})}')
+        assert src.count(p8k_ms_old) == 1, "P8k ms 锚点数量异常"
+        src = src.replace(p8k_ms_old, p8k_ms_new)
+
+        # list() 的覆盖应用并入 P17a（hidden 过滤补丁在 patch_ui 后段，见 p17a）
+
+        # getBookById：详情/元数据接口同样应用覆盖
+        p8k_gb_old = ('return n?{...n,title:this.settings.titleOverrides[n.id]||n.title,'
+                      'originalTitle:n.title}:n}')
+        p8k_gb_new = ('return n?{...n,title:this.settings.titleOverrides[n.id]||n.title,'
+                      'originalTitle:n.title,...(__BK_EDITS(this.settings,n)||{})}:n}')
+        assert src.count(p8k_gb_old) == 1, "P8k gb 锚点数量异常"
+        src = src.replace(p8k_gb_old, p8k_gb_new)
+
+    # P8l: 批量操作路由 —— 全部书 id（供「全选全部」，带当前关键词/收藏过滤）/
+    #   batch/favorite（显式收藏/取消，非 toggle）/ batch/edit（简介前后插、分类标签作者
+    #   追加/替换/重设）/ batch/cover-reset（从 cover_backup 恢复原封面）
+    if not globals().get("SKIP_P8L", False):
+        p8l_old = 'return f({success:!0,data:{id:e.id,cleared:r}})}),'
+        p8l_new = p8l_old + (
+            's.get("/api/book-ids",async o=>{'
+            'let e=k(o.query||""),kw=(e.keyword||"").trim().toLowerCase(),fav=e.favoritesOnly==="true",'
+            'a=t.books.filter(function(b){return !b.hidden});'
+            'if(kw)a=a.filter(c=>{var ed=(t.settings.bookEdits||{})[c.id]||{},'
+            'ti=(t.settings.titleOverrides||{})[c.id]||c.title,'
+            'de=ed.description!=null?ed.description:c.description,'
+            'tg=ed.tags!=null?ed.tags:(c.tags||[]);'
+            'return ti.toLowerCase().indexOf(kw)>=0||String(c.author||"").toLowerCase().indexOf(kw)>=0'
+            '||String(de||"").toLowerCase().indexOf(kw)>=0'
+            '||(tg||[]).some(u=>String(u).toLowerCase().indexOf(kw)>=0)});'
+            'if(fav){var s2=new Set(t.settings.favorites||[]);a=a.filter(c=>s2.has(c.id))}'
+            'return f({success:!0,data:{ids:a.map(c=>({id:c.id,title:(t.settings.titleOverrides||{})[c.id]||c.title}))}})}),'
+            's.post("/api/batch/favorite",async o=>{'
+            'let e=typeof o.body=="string"?JSON.parse(o.body):o.body||{},ids=e.ids||[],on=!!e.on,ch=0;'
+            't.settings.favorites||(t.settings.favorites=[]);'
+            'for(var i2=0;i2<ids.length;i2++){var id2=ids[i2];'
+            'if(on){t.settings.favorites.indexOf(id2)<0&&(t.settings.favorites.push(id2),ch++)}'
+            'else{var ix=t.settings.favorites.indexOf(id2);ix>=0&&(t.settings.favorites.splice(ix,1),ch++)}}'
+            'await t.saveSettings();return f({success:!0,data:{changed:ch}})}),'
+            's.post("/api/batch/edit",async o=>{'
+            'let e=typeof o.body=="string"?JSON.parse(o.body):o.body||{},ids=e.ids||[],ops=e.ops||{},ch=0,skip=0;'
+            't.settings.bookEdits||(t.settings.bookEdits={});'
+            'function __fld(ed,b,k,op,asTags){'
+            'if(!op||!op.mode)return;'
+            'var v=op.value==null?"":String(op.value).trim();'
+            'if(op.mode==="reset"){delete ed[k];return}'
+            'if(!v){skip++;return}'
+            'if(asTags){var cur=ed[k]!=null?ed[k]:(b[k]||[]);'
+            'if(op.mode==="append"){var add=v.split(/[,\\uFF0C\\u3001\\s]+/).filter(Boolean);'
+            'ed.tags=Array.from(new Set([].concat(cur,add)))}'
+            'else{ed.tags=v.split(/[,\\uFF0C\\u3001\\s]+/).filter(Boolean)}}'
+            'else{if(op.mode==="append")ed[k]=String(ed[k]!=null?ed[k]:(b[k]||""))+v;'
+            'else ed[k]=v}}'
+            'for(var i3=0;i3<ids.length;i3++){var id3=ids[i3],'
+            'b3=t.books.find(function(x){return x.id===id3&&!x.hidden});'
+            'if(!b3){skip++;continue}'
+            'var ed3=t.settings.bookEdits[id3]||(t.settings.bookEdits[id3]={});'
+            'if(ops.descriptionPrepend)ed3.description=String(ops.descriptionPrepend)+String(ed3.description!=null?ed3.description:(b3.description||""));'
+            'if(ops.descriptionAppend)ed3.description=String(ed3.description!=null?ed3.description:(b3.description||""))+String(ops.descriptionAppend);'
+            '__fld(ed3,b3,"category",ops.category,!1);'
+            '__fld(ed3,b3,"tags",ops.tags,!0);'
+            '__fld(ed3,b3,"author",ops.author,!1);'
+            'var any=!1;for(var kk in ed3)any=!0;'
+            'if(any)ch++;else delete t.settings.bookEdits[id3]}'
+            'await t.saveSettings();return f({success:!0,data:{changed:ch,skipped:skip}})}),'
+            's.post("/api/batch/cover-reset",async o=>{'
+            'let e=typeof o.body=="string"?JSON.parse(o.body):o.body||{},ids=e.ids||[],restored=[],missing=[];'
+            'for(var i4=0;i4<ids.length;i4++){var id4=ids[i4],'
+            'b4=t.books.find(function(x){return x.id===id4&&!x.hidden});'
+            'if(!b4)continue;'
+            'var bk="cover_backup/"+ct(id4)+".jpg",ok4=!1;'
+            'try{ok4=await songloft.fs.exists(bk)}catch(_){ok4=!1}'
+            'if(!ok4){missing.push(id4);continue}'
+            'try{var d4=await songloft.fs.readFile(bk,{encoding:"base64"});'
+            'await songloft.fs.writeFile(b4.folderRelPath+"/cover.jpg",d4,{encoding:"base64"});'
+            'try{await songloft.fs.unlink(bk)}catch(_){}'
+            'b4.coverUrl=b4.folderRelPath+"/cover.jpg";restored.push(id4)}catch(_){missing.push(id4)}}'
+            'try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
+            'return f({success:!0,data:{restored:restored,missing:missing}})}),')
+        assert src.count(p8l_old) == 1, "P8l 锚点数量异常"
+        src = src.replace(p8l_old, p8l_new)
+
+    # P8m: 自定义封面先备份 —— updateCover 覆写 cover.jpg 前把原封面存到插件目录
+    #   cover_backup/<ct(id)>.jpg（仅首次，避免二次改封面时备份被自定义图覆盖）；
+    #   「封面重设」从备份还原。缓存清理只清 .cache/transcode，不会动 cover_backup。
+    if not globals().get("SKIP_P8M", False):
+        p8m_old = ('let e=`${o.folderRelPath}/cover.jpg`;return await songloft.fs.writeFile(e,n,{encoding:"base64"}),'
+                   'o.coverUrl=e,`data:image/jpeg;base64,${n}`}')
+        p8m_new = ('let e=`${o.folderRelPath}/cover.jpg`;'
+                   'try{var __ex=await songloft.fs.exists(e).catch(function(){return!1});'
+                   'if(__ex){try{await songloft.fs.mkdir("cover_backup",{recursive:!0})}catch(__e){}'
+                   'var __bk="cover_backup/"+ct(o.id)+".jpg",'
+                   '__bex=await songloft.fs.exists(__bk).catch(function(){return!1});'
+                   'if(!__bex){var __d=await songloft.fs.readFile(e,{encoding:"base64"});'
+                   'await songloft.fs.writeFile(__bk,__d,{encoding:"base64"})}}}catch(_){}'
+                   'return await songloft.fs.writeFile(e,n,{encoding:"base64"}),'
+                   'o.coverUrl=e,`data:image/jpeg;base64,${n}`}')
+        assert src.count(p8m_old) == 1, "P8m 锚点数量异常"
+        src = src.replace(p8m_old, p8m_new)
 
     if not globals().get("SKIP_P8H_ROUTE", False):
         # 锚点收窄：不含 et 自身的闭合 '}'（原 '})}' 末尾 '}' 由源码保留，
@@ -1072,8 +1189,11 @@ def patch_ui(src: str) -> str:
     #   3) 目录重扫时丢弃扫描范围内的虚拟书（virt），交给扫描/合并重新生成
     if not globals().get("SKIP_P17", False):
         # p17a: list() 过滤 hidden
+        # list()：hidden 过滤后立即应用 bookEdits 覆盖（P8k）——
+        # 关键词搜索（简介/标签）与分类过滤均基于覆盖后值，与显示一致
         p17a_old = 'a=this.books.slice();'
-        p17a_new = 'a=this.books.filter(function(b){return !b.hidden}).slice();'
+        p17a_new = ('a=this.books.filter(function(b){return !b.hidden}).slice()'
+                    '.map(c=>({...c,...(__BK_EDITS(this.settings,c)||{})}));')
         assert src.count(p17a_old) == 1, "P17a 锚点数量异常"
         src = src.replace(p17a_old, p17a_new)
 
@@ -1515,6 +1635,64 @@ def patch_static(build_dir: str) -> None:
                '<strong>删除后不可恢复</strong>。</p>\n')
     html = rep(html, h19_old, h19_new, "H19")
 
+    # HG3a: 「全部书籍」标题后加「多选」切换按钮（第三组）
+    hg3a_old = '<h2 class="section-title" id="booksSectionTitle">全部书籍</h2>'
+    hg3a_new = (hg3a_old + '\n            <button class="ms-toggle" id="msToggle" type="button" '
+                'title="进入/退出多选模式">多选</button>')
+    html = rep(html, hg3a_old, hg3a_new, "HG3a")
+
+    # HG3b: bookGrid 前插入批量操作工具栏（多选模式下显示）
+    hg3b_old = '<div class="book-grid" id="bookGrid" aria-live="polite"></div>'
+    hg3b_new = ('<div class="batch-bar" id="batchBar" hidden>\n'
+                '          <span class="batch-count" id="batchCount">已选 0 本</span>\n'
+                '          <button id="msPageAll" type="button">本页全选</button>\n'
+                '          <button id="msPageInvert" type="button">本页反选</button>\n'
+                '          <button id="msAll" type="button">全选全部</button>\n'
+                '          <button id="msClear" type="button">清除选择</button>\n'
+                '          <span class="batch-sep"></span>\n'
+                '          <button id="msFavAdd" type="button">批量收藏</button>\n'
+                '          <button id="msFavDel" type="button">批量取消收藏</button>\n'
+                '          <button id="msEdit" type="button">批量编辑</button>\n'
+                '          <button id="msDelete" type="button" class="batch-danger">批量删除</button>\n'
+                '        </div>\n'
+                '        ' + hg3b_old)
+    html = rep(html, hg3b_old, hg3b_new, "HG3b")
+
+    # HG3c: 批量编辑弹窗（复用 .edit-overlay/.edit-modal 样式）
+    hg3c_old = '    <!-- 删除确认弹窗 -->\n'
+    hg3c_new = ('    <!-- 批量编辑弹窗 -->\n'
+                '    <div id="batchEditOverlay" class="edit-overlay" hidden>\n'
+                '      <div class="edit-modal batch-edit-modal">\n'
+                '        <h3>批量编辑（已选 <span id="beditCount">0</span> 本）</h3>\n'
+                '        <div class="bedit-row"><label>简介前插</label>'
+                '<textarea id="beditDescPre" rows="2" placeholder="插入到简介开头，留空跳过"></textarea></div>\n'
+                '        <div class="bedit-row"><label>简介后插</label>'
+                '<textarea id="beditDescApp" rows="2" placeholder="插入到简介末尾，留空跳过"></textarea></div>\n'
+                '        <div class="bedit-row"><label>分类</label><div class="bedit-fields">'
+                '<select id="beditCatMode"><option value="">不修改</option><option value="append">追加</option>'
+                '<option value="replace">替换</option><option value="reset">重设（还原扫描值）</option></select>'
+                '<input id="beditCatVal" placeholder="分类值"></div></div>\n'
+                '        <div class="bedit-row"><label>标签</label><div class="bedit-fields">'
+                '<select id="beditTagMode"><option value="">不修改</option><option value="append">追加</option>'
+                '<option value="replace">替换</option><option value="reset">重设（还原扫描值）</option></select>'
+                '<input id="beditTagVal" placeholder="多个标签用逗号分隔"></div></div>\n'
+                '        <div class="bedit-row"><label>作者</label><div class="bedit-fields">'
+                '<select id="beditAuthMode"><option value="">不修改</option><option value="append">追加</option>'
+                '<option value="replace">替换</option><option value="reset">重设（还原扫描值）</option></select>'
+                '<input id="beditAuthVal" placeholder="作者名"></div></div>\n'
+                '        <div class="bedit-row"><label>封面</label><label class="bedit-cover">'
+                '<input type="checkbox" id="beditCoverReset"> 重设封面（改过封面的书恢复原封面，无备份则跳过）</label></div>\n'
+                '        <p class="bedit-note">简介/分类/标签/作者的修改保存在覆盖层，重新扫描不会丢失；'
+                '「重设」清除覆盖恢复为扫描值。封面重设仅对改过封面且留有备份的书生效。</p>\n'
+                '        <div class="edit-actions">\n'
+                '          <button class="btn btn-ghost" id="beditCancel" type="button">取消</button>\n'
+                '          <button class="btn btn-primary" id="beditApply" type="button">应用到已选书籍</button>\n'
+                '        </div>\n'
+                '      </div>\n'
+                '    </div>\n'
+                + hg3c_old)
+    html = rep(html, hg3c_old, hg3c_new, "HG3c")
+
     open(html_path, "w", encoding="utf-8", newline="").write(html)
     print("  index.html: +显示方式/顺序下拉 +别名字段 +路径复制 +设置默认显示方式")
 
@@ -1684,7 +1862,7 @@ def patch_static(build_dir: str) -> None:
         "let wn=document.getElementById(\"delBookWarn\");"
         "if(wn){"
         "if(b.virt===\"shorts\"){let n2=(b.memberIds||[]).length;wn.textContent=" + _qs("⚠️ 将删除该合集内 ") + "+n2+" + _qs(" 本短篇各自的文件夹，删除后不可恢复。") + ";}"
-        "else if(b.isMisc||b.category===\"\\u672A\\u5206\\u7C7B\"||(o.id||\"\").indexOf(\"__misc__\")>=0){wn.textContent=" + _qs("⚠️ 将删除该文件夹下的全部音频文件，文件夹本身保留。") + ";}"
+        "else if(b.isMisc||b.category===\"\\u672A\\u5206\\u7C7B\"||(b.id||\"\").indexOf(\"__misc__\")>=0){wn.textContent=" + _qs("⚠️ 将删除该文件夹下的全部音频文件，文件夹本身保留。") + ";}"
         "else{wn.textContent=" + _qs("⚠️ 此操作将永久删除该书所在的整个文件夹及其全部音频、图片等文件，删除后不可恢复。") + ";}}"
         "window.__delId=id;o.hidden=!1}\n"
         "async function __doDel(){let id=window.__delId;if(!id)return;"
@@ -1780,6 +1958,82 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
     j22_old = "R(a.getAttribute(\"data-book\"),!0,a.getAttribute(\"data-chapter\"))})})}catch(e){"
     j22_new = ("R(a.getAttribute(\"data-book\"),!0,a.getAttribute(\"data-chapter\"))})}),r.querySelectorAll(\"[data-recent-del]\").forEach(a=>{a.addEventListener(\"click\",async o=>{o.stopPropagation(),await __delRecent(a.getAttribute(\"data-recent-del\"))})})}catch(e){")
     js = rep(js, j22_old, j22_new, "J22")
+
+    # ===== v1.3.28 第三组：书籍多选 + 批量删除/收藏/编辑 =====
+    # JG3a: 卡片模板左上角加多选复选框（仅多选模式显示），选中态由 window.__sel 驱动
+    jg3a_old = '<div class="book-card-cover">'
+    jg3a_new = ('<div class="book-card-cover">'
+                '<label class="book-card-sel">'
+                '<input type="checkbox" class="ms-check" data-ms="${t.id}"'
+                '${window.__sel&&window.__sel.has(t.id)?" checked":""}></label>')
+    js = rep(js, jg3a_old, jg3a_new, "JG3a")
+
+    # JG3b: 卡片选中态样式类（重渲染时保持高亮）
+    jg3b_old = '<div class="book-card" data-id="${t.id}">'
+    jg3b_new = '<div class="book-card${window.__sel&&window.__sel.has(t.id)?" ms-on":""}" data-id="${t.id}">'
+    js = rep(js, jg3b_old, jg3b_new, "JG3b")
+
+    # JG3c: 卡片点击在多选模式下改为切换选中（复选框/各按钮自身的点击不受影响）
+    jg3c_old = ('o.target.closest("[data-fav]")||o.target.closest("[data-play]")'
+                '||R(t.getAttribute("data-id"))')
+    jg3c_new = ('o.target.closest("[data-fav]")||o.target.closest("[data-play]")'
+                '||o.target.closest(".book-card-sel")'
+                '||(window.__msMode?__toggleSel(t.getAttribute("data-id")):R(t.getAttribute("data-id")))')
+    js = rep(js, jg3c_old, jg3c_new, "JG3c")
+
+    # JG3d: 复选框 change 事件 → __msCheck（click 冒泡到卡片会切换两次，须拦截）
+    jg3d_old = '__cardEdit(t.getAttribute("data-edit"))})}),__syncPlayBtns()}}'
+    jg3d_new = ('__cardEdit(t.getAttribute("data-edit"))})}),'
+                'e.querySelectorAll(".ms-check").forEach(t=>{'
+                't.addEventListener("click",o=>o.stopPropagation()),'
+                't.addEventListener("change",()=>{'
+                '__msCheck(t.getAttribute("data-ms"),t.checked)})}),'
+                '__syncPlayBtns()}}')
+    js = rep(js, jg3d_old, jg3d_new, "JG3d")
+
+    # JG3e: 多选核心逻辑 + 工具栏/批量编辑弹窗绑定（fe() 渲染后调用 __msBindBar 幂等绑定）
+    jg3e_old = 'async function Y(){try{let t=(await y("/api/recently-played")).items||[]'
+    jg3e_new = '''window.__sel=new Set(),window.__msMode=!1;
+function __msCount(){let e=document.getElementById("batchCount");e&&(e.textContent="\\u5df2\\u9009 "+window.__sel.size+" \\u672c")}
+function __msPaint(id){let c=document.querySelector('.ms-check[data-ms="'+id+'"]');if(c){c.checked=window.__sel.has(id);let d=c.closest(".book-card");d&&d.classList.toggle("ms-on",window.__sel.has(id))}}
+function __toggleSel(id){window.__sel.has(id)?window.__sel.delete(id):window.__sel.add(id),__msCount(),__msPaint(id)}
+function __msCheck(id,on){on?window.__sel.add(id):window.__sel.delete(id),__msCount(),__msPaint(id)}
+function __msAfter(){__msCount(),fe()}
+function __msSetMode(e){window.__msMode=e;let t=document.getElementById("batchBar");t&&(t.hidden=!e);let o=document.getElementById("bookGrid");o&&o.classList.toggle("ms-mode",e);let d=document.getElementById("msToggle");d&&d.classList.toggle("on",e),e||window.__sel.clear(),__msCount(),fe()}
+async function __msSelectAll(){try{let e=(document.getElementById("favoritesOnly")||{}).checked||!1,t=await y("/api/book-ids?keyword="+encodeURIComponent(n.keyword||"")+(e?"&favoritesOnly=true":""));(t.ids||[]).forEach(e=>window.__sel.add(e.id)),__msAfter(),u("\\u5df2\\u5168\\u9009 "+(t.ids||[]).length+" \\u672c\\uff08\\u542b\\u5176\\u4ed6\\u9875\\uff09")}catch(e){u(e.message)}}
+function __msFav(e){let t=Array.from(window.__sel);if(!t.length){u("\\u8bf7\\u5148\\u52fe\\u9009\\u4e66\\u7c4d");return}y("/api/batch/favorite",{method:"POST",body:JSON.stringify({ids:t,on:e})}).then(e=>{u((e.changed?"\\u5df2\\u66f4\\u65b0 "+e.changed+" \\u672c\\u6536\\u85cf\\u72b6\\u6001":"\\u6536\\u85cf\\u72b6\\u6001\\u65e0\\u53d8\\u5316")),window.__msMode&&fe(),w()}).catch(e=>u("\\u6279\\u91cf\\u6536\\u85cf\\u5931\\u8d25\\uff1a"+e.message))}
+function __msBatchDel(){let e=Array.from(window.__sel);if(!e.length){u("\\u8bf7\\u5148\\u52fe\\u9009\\u4e66\\u7c4d");return}__confirmBox("\\u6279\\u91cf\\u5220\\u9664","\\u786e\\u5b9a\\u8981<strong>\\u6c38\\u4e45\\u5220\\u9664</strong>\\u9009\\u4e2d\\u7684 "+e.length+" \\u672c\\u4e66\\u5417\\uff1f<br>\\u666e\\u901a\\u4e66\\u5220\\u9664\\u6574\\u4e2a\\u6587\\u4ef6\\u5939\\uff0c\\u5408\\u96c6\\u5220\\u9664\\u5176\\u4e0b\\u5404\\u77ed\\u7bc7\\u6587\\u4ef6\\u5939\\uff0c\\u672a\\u5206\\u7c7b\\u4ec5\\u5220\\u97f3\\u9891\\u3002<br>\\u6b64\\u64cd\\u4f5c\\u4e0d\\u53ef\\u6062\\u590d\\uff01",async()=>{let t=0,o=0;for(let d=0;d<e.length;d++){try{await y("/api/books/"+encodeURIComponent(e[d]),{method:"DELETE"}),window.__sel.delete(e[d]),t++}catch(i){o++}}u("\\u6279\\u91cf\\u5220\\u9664\\u5b8c\\u6210\\uff1a\\u6210\\u529f "+t+" \\u672c"+(o?"\\uff0c\\u5931\\u8d25 "+o+" \\u672c":"")),await w()})}
+function __msOpenEdit(){if(!window.__sel.size){u("\\u8bf7\\u5148\\u52fe\\u9009\\u4e66\\u7c4d");return}let e=document.getElementById("beditCount");e&&(e.textContent=window.__sel.size),["beditDescPre","beditDescApp","beditCatVal","beditTagVal","beditAuthVal"].forEach(e=>{let t=document.getElementById(e);t&&(t.value="")}),["beditCatMode","beditTagMode","beditAuthMode"].forEach(e=>{let t=document.getElementById(e);t&&(t.value="")});let t=document.getElementById("beditCoverReset");t&&(t.checked=!1);let o=document.getElementById("batchEditOverlay");o&&(o.hidden=!1)}
+function __msCloseEdit(){let e=document.getElementById("batchEditOverlay");e&&(e.hidden=!0)}
+async function __msApplyEdit(){let e=Array.from(window.__sel);if(!e.length){__msCloseEdit();return}
+let t=i=>{let el=document.getElementById(i);return el?el.value.trim():""},m=i=>{let el=document.getElementById(i);return el?el.value:""};
+let o={};let pre=t("beditDescPre"),app=t("beditDescApp");pre&&(o.descriptionPrepend=pre),app&&(o.descriptionAppend=app);
+let cm=m("beditCatMode");cm&&(o.category={mode:cm,value:t("beditCatVal")});
+let tm=m("beditTagMode");tm&&(o.tags={mode:tm,value:t("beditTagVal")});
+let am=m("beditAuthMode");am&&(o.author={mode:am,value:t("beditAuthVal")});
+let cr=document.getElementById("beditCoverReset"),cov=!(!cr||!cr.checked);
+if(!Object.keys(o).length&&!cov){u("\\u6ca1\\u6709\\u586b\\u5199\\u4efb\\u4f55\\u4fee\\u6539\\u5185\\u5bb9");return}
+let btn=document.getElementById("beditApply");btn&&(btn.disabled=!0);
+try{if(Object.keys(o).length){let d=await y("/api/batch/edit",{method:"POST",body:JSON.stringify({ids:e,ops:o})});u("\\u6279\\u91cf\\u7f16\\u8f91\\u5b8c\\u6210\\uff1a"+(d.changed||0)+" \\u672c\\u5df2\\u66f4\\u65b0"+((d.skipped||0)?"\\uff0c"+d.skipped+" \\u9879\\u8df3\\u8fc7":""))}
+if(cov){let d2=await y("/api/batch/cover-reset",{method:"POST",body:JSON.stringify({ids:e})});u("\\u5c01\\u9762\\u91cd\\u8bbe\\uff1a\\u6062\\u590d "+((d2.restored||[]).length)+" \\u672c\\uff0c\\u65e0\\u5907\\u4efd "+((d2.missing||[]).length)+" \\u672c")}
+__msCloseEdit(),await w()}catch(i){u("\\u6279\\u91cf\\u7f16\\u8f91\\u5931\\u8d25\\uff1a"+i.message)}finally{btn&&(btn.disabled=!1)}}
+function __msBindBar(){if(window.__msBound)return;window.__msBound=!0;
+let tg=document.getElementById("msToggle");tg&&tg.addEventListener("click",()=>__msSetMode(!window.__msMode));
+let pa=document.getElementById("msPageAll");pa&&pa.addEventListener("click",()=>{(n.books||[]).forEach(e=>window.__sel.add(e.id)),__msAfter()});
+let pi=document.getElementById("msPageInvert");pi&&pi.addEventListener("click",()=>{(n.books||[]).forEach(e=>{window.__sel.has(e.id)?window.__sel.delete(e.id):window.__sel.add(e.id)}),__msAfter()});
+let ll=document.getElementById("msAll");ll&&ll.addEventListener("click",__msSelectAll);
+let pc=document.getElementById("msClear");pc&&pc.addEventListener("click",()=>{window.__sel.clear(),__msAfter()});
+let fa=document.getElementById("msFavAdd");fa&&fa.addEventListener("click",()=>__msFav(!0));
+let fd=document.getElementById("msFavDel");fd&&fd.addEventListener("click",()=>__msFav(!1));
+let de=document.getElementById("msDelete");de&&de.addEventListener("click",__msBatchDel);
+let ed=document.getElementById("msEdit");ed&&ed.addEventListener("click",__msOpenEdit);
+let bc=document.getElementById("beditCancel");bc&&bc.addEventListener("click",__msCloseEdit);
+let bx=document.getElementById("beditClose");bx&&bx.addEventListener("click",__msCloseEdit);
+let bp=document.getElementById("beditApply");bp&&bp.addEventListener("click",__msApplyEdit);
+let ov=document.getElementById("batchEditOverlay");ov&&ov.addEventListener("click",e=>{e.target===e.currentTarget&&(e.currentTarget.hidden=!0)})}
+__msBindBar();
+async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
+    js = rep(js, jg3e_old, jg3e_new, "JG3e")
 
     # J23: De() 里绑定清空/确认弹窗/跳转按钮（IIFE 隔离作用域，避免变量名冲突）
     j23_old = ("document.getElementById(\"nextPage\").addEventListener(\"click\",()=>{let a=Math.max(1,Math.ceil(n.total/n.pageSize));n.page<a&&(n.page++,w())})")
@@ -2179,7 +2433,34 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         ".rescan-dirinfo code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; background: var(--surface); padding: 1px 5px; border-radius: 4px; color: var(--text); }\n"
         "#settingsOverlay { align-items: center; }\n"
         ".settings-sheet { max-width: 600px; width: 92%; max-height: 86vh; border-radius: var(--radius-lg); animation: ab-fade-in .2s ease; }\n"
-        "@keyframes ab-fade-in { from { opacity: 0; } to { opacity: 1; } }\n")
+        "@keyframes ab-fade-in { from { opacity: 0; } to { opacity: 1; } }\n"
+        # ---- v1.3.28 第三组：多选 + 批量操作 ----
+        ".ms-toggle { padding: 2px 12px; font-size: 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); cursor: pointer; margin-left: 10px; }\n"
+        ".ms-toggle:hover { border-color: var(--primary); color: var(--primary); }\n"
+        ".ms-toggle.on { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }\n"
+        ".batch-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 12px; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }\n"
+        ".batch-bar[hidden] { display: none; }\n"
+        ".batch-bar button { padding: 4px 10px; font-size: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); cursor: pointer; }\n"
+        ".batch-bar button:hover { border-color: var(--primary); color: var(--primary); }\n"
+        ".batch-bar .batch-danger { color: var(--danger); border-color: var(--danger); }\n"
+        ".batch-bar .batch-danger:hover { color: #fff; background: var(--danger); border-color: var(--danger); }\n"
+        ".batch-count { font-size: 12px; font-weight: 600; color: var(--text); }\n"
+        ".batch-sep { width: 1px; height: 16px; background: var(--border); }\n"
+        ".book-card { position: relative; }\n"
+        ".book-card-sel { display: none; position: absolute; top: 6px; left: 6px; z-index: 6; width: 24px; height: 24px; border-radius: 6px; background: rgba(0,0,0,.55); align-items: center; justify-content: center; }\n"
+        ".book-card-sel input { width: 15px; height: 15px; accent-color: var(--primary); cursor: pointer; margin: 0; }\n"
+        ".ms-mode .book-card-sel { display: flex; }\n"
+        ".book-card.ms-on { outline: 2px solid var(--primary); outline-offset: -2px; }\n"
+        ".edit-modal.batch-edit-modal { width: min(560px, 92vw); max-height: 86vh; overflow: auto; }\n"
+        ".bedit-row { display: flex; gap: 10px; align-items: flex-start; margin: 10px 0; }\n"
+        ".bedit-row > label:first-child { flex: none; width: 60px; font-size: 13px; color: var(--text); padding-top: 7px; }\n"
+        ".bedit-fields { flex: 1; display: flex; gap: 8px; min-width: 0; }\n"
+        ".bedit-fields select { flex: none; }\n"
+        ".bedit-fields input { flex: 1; min-width: 0; }\n"
+        ".bedit-row textarea, .bedit-fields input, .bedit-fields select { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text); padding: 6px 8px; font-size: 13px; }\n"
+        ".bedit-row textarea { flex: 1; resize: vertical; }\n"
+        ".bedit-cover { flex: 1; font-size: 13px; color: var(--text); display: flex; align-items: center; gap: 6px; padding-top: 7px; }\n"
+        ".bedit-note { font-size: 12px; line-height: 1.6; color: var(--text-2); margin: 10px 0 0; }\n")
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     print("  style.css: +mode-small/mode-list +别名/路径/设置行样式")
