@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.35"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.36"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -194,7 +194,11 @@ def patch(src: str) -> str:
         "description:nm+\" \\u76EE\\u5F55\\u4E0B\\u7684\\u96F6\\u6563\\u97F3\\u9891\\u6587\\u4EF6\","
         "category:\"\\u672A\\u5206\\u7C7B\",tags:[],updatedAt:o||Date.now(),"
         "chapterCount:cs.length,totalSize:e,folderRelPath:dir};"
-        "t.books.push(bk),t.chaptersByBookId[bk.id]=cs}"
+        "t.books.push(bk),t.chaptersByBookId[bk.id]=cs;"
+        "if(__SH_NEW&&__SH_NEW[__SH_GRP])try{var __mm=0;"
+        "try{var __dm=await songloft.fs.stat(dir);__mm=Number((__dm&&__dm.modTime)||0)}catch(_){}"
+        "var __msig=await __shSig(auds,[],dir);"
+        "__SH_NEW[__SH_GRP].push({rel:rel+\"/__misc__\",mt:__mm,sig:__msig,book:bk,chapters:cs})}catch(_){}}"
         # __D: 递归判定书籍
         "async function __D(s,rel,t,IG,d){if(d>20)return;"
         "let dir=rel?s+\"/\"+rel:s,es;"
@@ -459,6 +463,9 @@ def patch_ui(src: str) -> str:
             "if(!AUD.has(ext))continue;"
             "try{await songloft.fs.unlink(p+\"/\"+x.name),removed++}catch(_){failed++}}"
             "return{filesFailed:failed,dirsTotal:0,dirsRemoved:0,dirGone:!1,fallback:\"\",keptFolder:!0,audioRemoved:removed}}\n"
+            # v1.3.36: 删除书籍后清除该路径所在顶层组的增量扫描分片——
+            # 否则残留分片会让下一次增量扫描继续复用旧数据（已删目录的条目残留）
+            "async function __SH_DROP(relp){try{if(!relp||relp.indexOf(M)!==0)return;var sg=relp.slice(M.length+1).split(\"/\")[0];if(sg)await songloft.fs.unlink(__SHD+\"/\"+ct(sg)+\".json\")}catch(_){}}\n"
         )
         p8i_old = ('async function __delBook(t,id){let o=t.books.find(b=>b.id===id);if(!o)return!1;'
                    'let p=o.folderRelPath;if(!p||typeof p!=="string"||p.indexOf(M)!==0)'
@@ -477,18 +484,23 @@ def patch_ui(src: str) -> str:
             'var p=o.folderRelPath;if(!p||typeof p!=="string"||p.indexOf(M)!==0)throw new Error(' + _qs("路径非法，拒绝删除") + ');'
             'if(p===M||p===M+"/")throw new Error(' + _qs("不能删除书库根目录") + ');'
             'if(o.virt==="shorts"){var mids=o.memberIds||[],agg={filesFailed:0,dirsTotal:0,dirsRemoved:0,dirGone:!1,fallback:"",keptFolder:!1,collection:!0,memberCount:mids.length};'
+            'var __sgs={};'
             'for(var mi=0;mi<mids.length;mi++){var mb=t.books.find(function(b){return b.id===mids[mi]});if(!mb||!mb.folderRelPath)continue;'
-            'var r2=await __RM(mb.folderRelPath);agg.filesFailed+=(r2.filesFailed||0);agg.dirsRemoved+=(r2.dirsRemoved||0);agg.dirsTotal+=(r2.dirsTotal||0);if(r2.fallback)agg.fallback=r2.fallback}'
+            'var r2=await __RM(mb.folderRelPath);agg.filesFailed+=(r2.filesFailed||0);agg.dirsRemoved+=(r2.dirsRemoved||0);agg.dirsTotal+=(r2.dirsTotal||0);if(r2.fallback)agg.fallback=r2.fallback;'
+            'try{var __sg2=mb.folderRelPath.slice(M.length+1).split("/")[0];__sgs[__sg2]=1}catch(_){}}'
+            'try{for(var __gk in __sgs)await __SH_DROP(M+"/"+__gk)}catch(_){}'
             't.books=t.books.filter(function(b){return b.id!==id&&mids.indexOf(b.id)<0});'
             'for(var mi2=0;mi2<mids.length;mi2++){delete t.chaptersByBookId[mids[mi2]];if(t.settings.favorites)t.settings.favorites=t.settings.favorites.filter(function(x){return x!==mids[mi2]});if(t.settings.titleOverrides)delete t.settings.titleOverrides[mids[mi2]];if(t.settings.playbackRates)delete t.settings.playbackRates[mids[mi2]]}'
             'delete t.chaptersByBookId[id];if(t.settings.favorites)t.settings.favorites=t.settings.favorites.filter(function(x){return x!==id});if(t.settings.titleOverrides)delete t.settings.titleOverrides[id];if(t.settings.playbackRates)delete t.settings.playbackRates[id];'
             'await t.saveSettings();try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
             'return agg}'
             'if(o.isMisc||o.category==="\\u672A\\u5206\\u7C7B"||(o.id||"").indexOf("__misc__")>=0){var rm=await __RMaudio(p);'
+            'await __SH_DROP(p);'
             't.books=t.books.filter(function(b){return b.id!==id});delete t.chaptersByBookId[id];if(t.settings.favorites)t.settings.favorites=t.settings.favorites.filter(function(x){return x!==id});if(t.settings.titleOverrides)delete t.settings.titleOverrides[id];if(t.settings.playbackRates)delete t.settings.playbackRates[id];'
             'await t.saveSettings();try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
             'return rm}'
             'var rm=await __RM(p);'
+            'await __SH_DROP(p);'
             't.books=t.books.filter(function(b){return b.id!==id});delete t.chaptersByBookId[id];if(t.settings.favorites)t.settings.favorites=t.settings.favorites.filter(function(x){return x!==id});if(t.settings.titleOverrides)delete t.settings.titleOverrides[id];if(t.settings.playbackRates)delete t.settings.playbackRates[id];'
             'await t.saveSettings();try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
             'return rm}')
@@ -1089,6 +1101,7 @@ def patch_ui(src: str) -> str:
                     '__SCANP.fastHit=0,__SCANP.fastMiss=0,__SCANP.fastProbe="";'
                     'var __SHD=".cache/abscan";'
                     'var __SH_OLD={},__SH_NEW={},__SH_GRP="",__SH_FORCE=0,__SH_REUSE=0;'
+                    'var __SH_ME=/\\/__misc__$/;'
                     'async function __shSig(auds,others,dir){'
                     'let h=ct(auds.join("|")+"#"+others.join("|"));'
                     'try{let m=await songloft.fs.stat(dir+"/metadata.json");if(m)h+="-"+Number(m.modTime||0)}catch(_){}'
@@ -1097,7 +1110,7 @@ def patch_ui(src: str) -> str:
                     'try{let es=await songloft.fs.readdir(__SHD)||[];'
                     'for(let i=0;i<es.length;i++){if(es[i].isDir)continue;'
                     'try{let j=JSON.parse(await songloft.fs.readFile(__SHD+"/"+es[i].name));'
-                    'if(j&&j.items)for(let k=0;k<j.items.length;k++){let it=j.items[k];if(it&&it.rel)out[it.rel]=it}}catch(_){}}}catch(_){}'
+                    'if(j&&j.items&&j.v===2)for(let k=0;k<j.items.length;k++){let it=j.items[k];if(it&&it.rel)out[it.rel]=it}}catch(_){}}}catch(_){}'
                     'return out}'
                     'async function __shSave(g,items){'
                     'try{await songloft.fs.mkdir(__SHD,{recursive:!0})}catch(_){}'
