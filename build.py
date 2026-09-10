@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.30"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.31"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -1652,6 +1652,7 @@ def patch_static(build_dir: str) -> None:
                 '          <button id="msPageAll" type="button">本页全选</button>\n'
                 '          <button id="msPageInvert" type="button">本页反选</button>\n'
                 '          <button id="msAll" type="button">全选全部</button>\n'
+                '          <button id="msAllInvert" type="button">反选全部</button>\n'
                 '          <button id="msClear" type="button">清除选择</button>\n'
                 '          <span class="batch-sep"></span>\n'
                 '          <button id="msFavAdd" type="button">批量收藏</button>\n'
@@ -2031,6 +2032,7 @@ let tg=document.getElementById("msToggle");tg&&tg.addEventListener("click",()=>_
 let pa=document.getElementById("msPageAll");pa&&pa.addEventListener("click",()=>{(n.books||[]).forEach(e=>window.__sel.add(e.id)),__msAfter()});
 let pi=document.getElementById("msPageInvert");pi&&pi.addEventListener("click",()=>{(n.books||[]).forEach(e=>{window.__sel.has(e.id)?window.__sel.delete(e.id):window.__sel.add(e.id)}),__msAfter()});
 let ll=document.getElementById("msAll");ll&&ll.addEventListener("click",__msSelectAll);
+let ai=document.getElementById("msAllInvert");ai&&ai.addEventListener("click",async()=>{try{let e=(document.getElementById("favoritesOnly")||{}).checked||!1,t=await y("/api/book-ids?keyword="+encodeURIComponent(n.keyword||"")+(e?"&favoritesOnly=true":""));(t.ids||[]).forEach(function(b){window.__sel.has(b.id)?window.__sel.delete(b.id):window.__sel.add(b.id)}),__msAfter(),u("\\u5df2\\u5bf9\\u5168\\u90e8"+(t.ids||[]).length+"\\u672c\\u6267\\u884c\\u53cd\\u9009")}catch(e){u(e.message)}});
 let pc=document.getElementById("msClear");pc&&pc.addEventListener("click",()=>{window.__sel.clear(),__msAfter()});
 let fa=document.getElementById("msFavAdd");fa&&fa.addEventListener("click",()=>__msFav(!0));
 let fd=document.getElementById("msFavDel");fd&&fd.addEventListener("click",()=>__msFav(!1));
