@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.29"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.30"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -1743,8 +1743,11 @@ def patch_static(build_dir: str) -> None:
     js = rep(js, j2_old, j2_new, "J2")
 
     # J3: 初始化时绑定 显示方式/设置默认/复制路径 控件
+    #     注意：此处曾插入从未定义的 __initViewMode()，Oe() 启动即抛 ReferenceError，
+    #     导致其后的 Y()（最近播放渲染）从不执行、最近播放区块一直隐藏 —— v1.3.30 修复
     j3_old = "function Oe(){b(),De(),k(\"homeView\"),X(),Y()}"
-    j3_new = "function Oe(){b(),De(),k(\"homeView\"),X(),__initViewMode(),Y()}"
+    j3_new = ("function Oe(){b(),De(),k(\"homeView\"),X(),"
+              "function(){try{__syncViewModeUI()}catch(_){}}(),Y()}")
     js = rep(js, j3_old, j3_new, "J3")
 
     # J4: 打开设置弹窗时同步两个默认显示方式下拉
@@ -1890,13 +1893,15 @@ def patch_static(build_dir: str) -> None:
 
     # J15: 卡片模板加编辑按钮 + 删除按钮
     #      未分类书（isMisc / category==="未分类" / id 含 __misc__）显示灰色禁用叉（disabled，点击不触发）
+    #      v1.3.27 首版此处漏了 title 属性收尾引号（`:"删除"}>`），未闭合属性吞掉后续全部卡片
+    #      标记，整页塌缩成一个节点（大/小图标只显示一个、列表显示异常）—— v1.3.30 修复
     j15_old = "        <button class=\"book-card-play\" data-play=\"${t.id}\" title=\"\\u64AD\\u653E\">\\u25B6</button>"
     j15_new = (j15_old + "\n"
                "        <button class=\"book-card-edit\" data-edit=\"${t.id}\" title=\"\\u7F16\\u8F91\">\\u270E</button>\n"
                "        <button class=\"book-card-del\" data-del=\"${t.id}\" title=\""
                "${(t.virt===\"shorts\")?\"\\u5220\\u9664\\u5408\\u96C6\\uFF1A\\u5220\\u9664\\u5176\\u4E0B\\u5404\\u77ED\\u7BC7\\u7684\\u6587\\u4EF6\\u5939\""
                ":(t.isMisc||t.category===\"\\u672A\\u5206\\u7C7B\"||(t.id||\"\").indexOf(\"__misc__\")>=0)?\"\\u5220\\u9664\\u672A\\u5206\\u7C7B\\uFF1A\\u4EC5\\u5220\\u9664\\u97F3\\u9891\\u6587\\u4EF6\\uFF0C\\u4FDD\\u7559\\u6587\\u4EF6\\u5939\""
-               ":\"\\u5220\\u9664\"}>\\u2716</button>")
+               ":\"\\u5220\\u9664\"}\">\\u2716</button>")
     js = rep(js, j15_old, j15_new, "J15")
 
     # J16: 绑定删除按钮点击事件

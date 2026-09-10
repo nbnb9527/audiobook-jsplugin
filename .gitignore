@@ -61,3 +61,4 @@ scan_*.py
 survey.py
 rename_by_tag.py
 fixture/
+uitest/
