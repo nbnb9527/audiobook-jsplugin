@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.31"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.32"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -1282,6 +1282,168 @@ def patch_ui(src: str) -> str:
         assert src.count(p17l_old) == 1, "P17l 锚点数量异常"
         src = src.replace(p17l_old, p17l_new)
 
+    # ---- v1.3.32 第四组：自定义合集 / 合集包 / 打散 / 主页筛选 ----
+    # 设计：
+    #   - 定义存 settings.customCollections=[{id,name,memberIds}] 与 collectionPacks=[{id,name,collectionIds}]，
+    #     与扫描缓存完全解耦 —— 重扫/「仅忽略合集缓存」/清缓存均不影响，持久化天然成立。
+    #   - __CUSTOM_MERGE(t,s)：仿 __SHORTS_MERGE，把定义物化为虚拟书（virt:"custom"/"pack"，
+    #     id 前缀 __custom_/__pack_），flatten 成员章节（播放直接可用），隐藏成员（mergedInto/hidden）。
+    #     幂等：先移除旧虚拟书并解除其成员隐藏，再按最新定义重建；打散=删定义后重跑。
+    #   - 三处 __SHORTS_MERGE 调用点（全量扫描 / 缓存加载 / 部分重扫）之后都重建自定义合集。
+    if not globals().get("SKIP_G4", False):
+        # G4a: 构造函数 settings 默认值补两个数组键 + 全局设置镜像 __CSET
+        g4a_old = ('this.settings={favorites:[],recentlyPlayed:[],'
+                   'uiPrefs:{viewDesktop:"large",viewMobile:"large"},titleOverrides:{},playbackRates:{}}')
+        g4a_new = ('this.settings={favorites:[],recentlyPlayed:[],'
+                   'uiPrefs:{viewDesktop:"large",viewMobile:"large"},titleOverrides:{},playbackRates:{},'
+                   'customCollections:[],collectionPacks:[]};__CSET=this.settings')
+        assert src.count(g4a_old) == 1, "G4a 锚点数量异常"
+        src = src.replace(g4a_old, g4a_new)
+
+        # G4b: __MS 深合并补两个数组键（数组必须整体替换，不能 Object.assign）
+        g4b_old = 'bookEdits:Object.assign({},a&&a.bookEdits,b.bookEdits)})}'
+        g4b_new = ('bookEdits:Object.assign({},a&&a.bookEdits,b.bookEdits),'
+                   'customCollections:Array.isArray(b.customCollections)?b.customCollections:(a&&a.customCollections||[]),'
+                   'collectionPacks:Array.isArray(b.collectionPacks)?b.collectionPacks:(a&&a.collectionPacks||[])})}')
+        assert src.count(g4b_old) == 1, "G4b 锚点数量异常"
+        src = src.replace(g4b_old, g4b_new)
+
+        # G4c: __CUSTOM_MERGE 函数 + saveSettings 同步 __CSET
+        g4c_old = 'var K="audiobook_settings_v1"'
+        g4c_new = (
+            'var __CSET=null;'
+            'function __CUSTOM_MERGE(t,s){s=s||__CSET||{};'
+            'var cols=Array.isArray(s.customCollections)?s.customCollections:[],'
+            'packs=Array.isArray(s.collectionPacks)?s.collectionPacks:[];'
+            'for(var i=t.books.length-1;i>=0;i--){var b=t.books[i];'
+            'if(b.virt==="custom"||b.virt==="pack"){t.books.splice(i,1);delete t.chaptersByBookId[b.id]}}'
+            'for(var i2=0;i2<t.books.length;i2++){var b2=t.books[i2];'
+            'if(b2.virt==="custom"||b2.virt==="pack")continue;'
+            'if(b2.mergedInto&&(String(b2.mergedInto).indexOf("__custom_")===0||String(b2.mergedInto).indexOf("__pack_")===0)){b2.mergedInto="";b2.hidden=!1}}'
+            'var built={};'
+            'for(var ci=0;ci<cols.length;ci++){var c=cols[ci];if(!c||!c.id)continue;'
+            'var vid="__custom_"+c.id,cs=[],size=0,upd=0,cover="",names=[],mids=[],'
+            'mem=Array.isArray(c.memberIds)?c.memberIds:[];'
+            'for(var mi=0;mi<mem.length;mi++){var mb0=null;'
+            'for(var z=0;z<t.books.length;z++)if(t.books[z].id===mem[mi]){mb0=t.books[z];break}'
+            'if(!mb0)continue;'
+            'mids.push(mb0.id);'
+            'var chs=(t.chaptersByBookId[mb0.id]||[]).slice();'
+            'chs.sort(function(a,c2){return (a.index||0)-(c2.index||0)});'
+            'for(var m=0;m<chs.length;m++){var c3=chs[m];'
+            'cs.push({id:c3.id,index:0,title:"\\u300A"+(mb0.title||"")+"\\u300B"+(c3.title||""),duration:c3.duration,fileSize:c3.fileSize,fileRelPath:c3.fileRelPath,modTime:c3.modTime})}'
+            'if(!cover&&mb0.coverUrl)cover=mb0.coverUrl;'
+            'names.push(mb0.title||"");size+=mb0.totalSize||0;if((mb0.updatedAt||0)>upd)upd=mb0.updatedAt}'
+            'if(!mids.length)continue;'
+            'for(var k=0;k<cs.length;k++)cs[k].index=k+1;'
+            'var vb={id:vid,virt:"custom",memberIds:mids,title:c.name||"\\u81EA\\u5B9A\\u4E49\\u5408\\u96C6",author:"\\u5408\\u96C6",coverUrl:cover,coverRatio:"",description:"\\u81EA\\u5B9A\\u4E49\\u5408\\u96C6\\uFF0C\\u5171 "+mids.length+" \\u672C\\uFF1A"+names.join("\\u3001"),category:"\\u81EA\\u5B9A\\u4E49\\u5408\\u96C6",tags:[],updatedAt:upd||Date.now(),chapterCount:cs.length,totalSize:size,folderRelPath:"",isMisc:!0};'
+            'built[vid]=vb;t.chaptersByBookId[vid]=cs;t.books.push(vb);'
+            'for(var h=0;h<mids.length;h++)for(var z2=0;z2<t.books.length;z2++){var bb=t.books[z2];'
+            'if(bb.id===mids[h]&&bb!==vb){bb.mergedInto=vid;bb.hidden=!0;break}}}'
+            'for(var pi=0;pi<packs.length;pi++){var p=packs[pi];if(!p||!p.id)continue;'
+            'var pvid="__pack_"+p.id,pcs=[],psize=0,pupd=0,pnames=[],pmids=[],'
+            'cids=Array.isArray(p.collectionIds)?p.collectionIds:[];'
+            'for(var qi=0;qi<cids.length;qi++){var cvid="__custom_"+cids[qi],cb=built[cvid];if(!cb)continue;'
+            'pmids.push(cb.id);pcs=pcs.concat(t.chaptersByBookId[cvid]||[]);pnames.push(cb.title||"");'
+            'psize+=cb.totalSize||0;if((cb.updatedAt||0)>pupd)pupd=cb.updatedAt}'
+            'if(!pmids.length)continue;'
+            'for(var k3=0;k3<pcs.length;k3++)pcs[k3].index=k3+1;'
+            'var pv={id:pvid,virt:"pack",memberIds:pmids,title:p.name||"\\u5408\\u96C6\\u5305",author:"\\u5408\\u96C6\\u5305",coverUrl:(built[pmids[0]]||{}).coverUrl||"",coverRatio:"",description:"\\u5408\\u96C6\\u5305\\uFF0C\\u5305\\u542B "+pmids.length+" \\u4E2A\\u5408\\u96C6\\uFF1A"+pnames.join("\\u3001"),category:"\\u5408\\u96C6\\u5305",tags:[],updatedAt:pupd||Date.now(),chapterCount:pcs.length,totalSize:psize,folderRelPath:"",isMisc:!0};'
+            't.chaptersByBookId[pvid]=pcs;t.books.push(pv);'
+            'for(var h3=0;h3<pmids.length;h3++){var cb2=built[pmids[h3]];if(cb2){cb2.mergedInto=pvid;cb2.hidden=!0}}}'
+            '}\n'
+            'var K="audiobook_settings_v1"')
+        assert src.count(g4c_old) == 1, "G4c 锚点数量异常"
+        src = src.replace(g4c_old, g4c_new)
+
+        g4c2_old = 'async saveSettings(){try{await songloft.storage.set(K,this.settings)}catch(t){'
+        g4c2_new = ('async saveSettings(){__CSET=this.settings;'
+                    'try{await songloft.storage.set(K,this.settings)}catch(t){')
+        assert src.count(g4c2_old) == 1, "G4c2 saveSettings 锚点数量异常"
+        src = src.replace(g4c2_old, g4c2_new)
+
+        # G4d: 三处 __SHORTS_MERGE 调用点后重建自定义合集
+        g4d1_old = '__SHORTS_MERGE(t);return __SCANP.scanning=!1,'
+        g4d1_new = '__SHORTS_MERGE(t),__CUSTOM_MERGE(t);return __SCANP.scanning=!1,'
+        assert src.count(g4d1_old) == 1, "G4d1 锚点数量异常"
+        src = src.replace(g4d1_old, g4d1_new)
+
+        g4d2_old = '__SHORTS_MERGE(base);this.books=base.books;'
+        g4d2_new = '__SHORTS_MERGE(base),__CUSTOM_MERGE(base,this.settings);this.books=base.books;'
+        assert src.count(g4d2_old) == 1, "G4d2 锚点数量异常"
+        src = src.replace(g4d2_old, g4d2_new)
+
+        g4d3_old = '__SHORTS_MERGE(out);this.books=out.books;'
+        g4d3_new = '__SHORTS_MERGE(out),__CUSTOM_MERGE(out,this.settings);this.books=out.books;'
+        assert src.count(g4d3_old) == 1, "G4d3 锚点数量异常"
+        src = src.replace(g4d3_old, g4d3_new)
+
+        # G4e: __delBook 支持 custom/pack —— 打散（只删定义，成员恢复显示，不删任何文件）
+        g4e_old = ('var p=o.folderRelPath;if(!p||typeof p!=="string"||p.indexOf(M)!==0)throw new Error('
+                   + _qs("路径非法，拒绝删除") + ');')
+        g4e_new = ('if(o.virt==="custom"||o.virt==="pack"){'
+                   'var __cid=(o.id||"").replace(/^__(?:custom|pack)_/,"");'
+                   't.settings.customCollections=(t.settings.customCollections||[]).filter(function(c){return c.id!==__cid});'
+                   't.settings.collectionPacks=(t.settings.collectionPacks||[]).filter(function(c){return c.id!==__cid});'
+                   'await t.saveSettings();__CUSTOM_MERGE(t,t.settings);'
+                   'try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
+                   'return{filesFailed:0,dirsTotal:0,dirsRemoved:0,dirGone:!1,fallback:"",keptFolder:!0,audioRemoved:0,scatter:!0}}'
+                   + g4e_old)
+        assert src.count(g4e_old) == 1, "G4e 锚点数量异常"
+        src = src.replace(g4e_old, g4e_new)
+
+        # G4f: DELETE 响应补 scatter 字段
+        g4f_old = 'collection:r.collection||!1,memberCount:r.memberCount||0}}'
+        g4f_new = 'collection:r.collection||!1,memberCount:r.memberCount||0,scatter:r.scatter||!1}}'
+        assert src.count(g4f_old) == 1, "G4f 锚点数量异常"
+        src = src.replace(g4f_old, g4f_new)
+
+        # G4g: 合集管理路由 —— 列表 / 创建（collection|pack）/ 打散
+        g4g_old = 'return f({success:!0,data:{restored:restored,missing:missing}})}),'
+        g4g_new = g4g_old + (
+            's.get("/api/collections",async()=>f({success:!0,data:{collections:t.settings.customCollections||[],packs:t.settings.collectionPacks||[]}})),'
+            's.post("/api/collections",async o=>{'
+            'let e=typeof o.body=="string"?JSON.parse(o.body):o.body||{},'
+            'name=String(e.name||"").trim(),type=e.type==="pack"?"pack":"collection",ids=(e.ids||[]).map(String);'
+            'if(!name)return h("' + _u("名称不能为空") + '",400);'
+            'if(!ids.length)return h("' + _u("请先勾选成员") + '",400);'
+            'var nid=Date.now().toString(36)+Math.random().toString(36).slice(2,6);'
+            'if(type==="pack"){var cids=[];'
+            'for(var i=0;i<ids.length;i++){var id0=ids[i];'
+            'if(id0.indexOf("__custom_")!==0)return h("' + _u("合集包只能由自定义合集组成") + '",400);'
+            'cids.push(id0.slice("__custom_".length))}'
+            't.settings.collectionPacks||(t.settings.collectionPacks=[]);'
+            't.settings.collectionPacks.push({id:nid,name:name,collectionIds:cids})}'
+            'else{t.settings.customCollections||(t.settings.customCollections=[]);'
+            't.settings.customCollections.push({id:nid,name:name,memberIds:ids})}'
+            'await t.saveSettings();__CUSTOM_MERGE(t,t.settings);'
+            'try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
+            'return f({success:!0,data:{id:nid,type:type}})}),'
+            's.post("/api/collections/:id/scatter",async(o,e)=>{var cid=e.id;'
+            't.settings.customCollections=(t.settings.customCollections||[]).filter(function(c){return c.id!==cid});'
+            't.settings.collectionPacks=(t.settings.collectionPacks||[]).filter(function(c){return c.id!==cid});'
+            'await t.saveSettings();__CUSTOM_MERGE(t,t.settings);'
+            'try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
+            'return f({success:!0,data:{id:cid,scatter:!0}})}),')
+        assert src.count(g4g_old) == 1, "G4g 锚点数量异常"
+        src = src.replace(g4g_old, g4g_new)
+
+        # G4h: list() 支持 libFilter（shorts/custom/pack/fav）
+        g4h_old = ',t.favoritesOnly){let c=new Set(this.settings.favorites);a=a.filter(u=>c.has(u.id))}'
+        g4h_new = (g4h_old +
+                   ';if(t.libFilter==="shorts")a=a.filter(c=>c.virt==="shorts");'
+                   'else if(t.libFilter==="custom")a=a.filter(c=>c.virt==="custom");'
+                   'else if(t.libFilter==="pack")a=a.filter(c=>c.virt==="pack");'
+                   'else if(t.libFilter==="fav"&&!t.favoritesOnly){let c2=new Set(this.settings.favorites);a=a.filter(u=>c2.has(u.id))}')
+        assert src.count(g4h_old) == 1, "G4h 锚点数量异常"
+        src = src.replace(g4h_old, g4h_new)
+
+        # G4i: /api/books 路由透传 libFilter
+        g4i_old = 'sortBy:e.sortBy||"updatedAt",order:e.order||""'
+        g4i_new = 'sortBy:e.sortBy||"updatedAt",order:e.order||"",libFilter:e.libFilter||""'
+        assert src.count(g4i_old) == 1, "G4i 锚点数量异常"
+        src = src.replace(g4i_old, g4i_new)
+
     return src
 
 
@@ -1658,6 +1820,7 @@ def patch_static(build_dir: str) -> None:
                 '          <button id="msFavAdd" type="button">批量收藏</button>\n'
                 '          <button id="msFavDel" type="button">批量取消收藏</button>\n'
                 '          <button id="msEdit" type="button">批量编辑</button>\n'
+                '          <button id="msSaveCol" type="button">存为合集</button>\n'
                 '          <button id="msDelete" type="button" class="batch-danger">批量删除</button>\n'
                 '        </div>\n'
                 '        ' + hg3b_old)
@@ -1697,6 +1860,51 @@ def patch_static(build_dir: str) -> None:
                 '    </div>\n'
                 + hg3c_old)
     html = rep(html, hg3c_old, hg3c_new, "HG3c")
+
+    # HG4a: 新建合集/合集包弹窗（第四组）
+    hg4a_old = '    <!-- 删除确认弹窗 -->\n'
+    hg4a_new = ('    <!-- 新建合集/合集包弹窗 -->\n'
+                '    <div id="colOverlay" class="edit-overlay" hidden>\n'
+                '      <div class="edit-modal">\n'
+                '        <h3>存为合集</h3>\n'
+                '        <div class="edit-field">\n'
+                '          <label for="colName">合集名称</label>\n'
+                '          <input type="text" id="colName" placeholder="如：睡前故事" />\n'
+                '        </div>\n'
+                '        <div class="edit-field">\n'
+                '          <label for="colType">类型</label>\n'
+                '          <select id="colType">\n'
+                '            <option value="collection">书籍合集（选中的书组成一个合集）</option>\n'
+                '            <option value="pack">合集包（选中的自定义合集组成一个包）</option>\n'
+                '          </select>\n'
+                '          <div class="col-hint" id="colHint"></div>\n'
+                '        </div>\n'
+                '        <div class="edit-actions">\n'
+                '          <button class="btn btn-ghost" id="colCancel" type="button">取消</button>\n'
+                '          <button class="btn btn-primary" id="colCreate" type="button">创建</button>\n'
+                '        </div>\n'
+                '      </div>\n'
+                '    </div>\n'
+                + hg4a_old)
+    html = rep(html, hg4a_old, hg4a_new, "HG4a")
+
+    # HG4b: 主页筛选下拉（全部/收藏/自动合集/自定义合集/合集包）
+    hg4b_old = ('      <label class="fav-toggle">\n'
+                '        <input type="checkbox" id="favoritesOnly" />\n'
+                '        只看收藏\n'
+                '      </label>\n')
+    hg4b_new = ('      <label>\n'
+                '        筛选：\n'
+                '        <select id="libFilter">\n'
+                '          <option value="">全部</option>\n'
+                '          <option value="fav">收藏</option>\n'
+                '          <option value="shorts">自动合集</option>\n'
+                '          <option value="custom">自定义合集</option>\n'
+                '          <option value="pack">合集包</option>\n'
+                '        </select>\n'
+                '      </label>\n'
+                + hg4b_old)
+    html = rep(html, hg4b_old, hg4b_new, "HG4b")
 
     open(html_path, "w", encoding="utf-8", newline="").write(html)
     print("  index.html: +显示方式/顺序下拉 +别名字段 +路径复制 +设置默认显示方式")
@@ -2056,6 +2264,64 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                 'function(){try{__syncViewModeUI()}catch(_){}}(),')
     js = rep(js, jg4a_old, jg4a_new, "JG4a")
 
+    # ---- v1.3.32 第四组前端 ----
+    # JG4b: w() 查询附带 libFilter（主页筛选下拉）
+    jg4b_old = '(__so?"&order="+__so:""));'
+    jg4b_new = ('(__so?"&order="+__so:"")'
+                '+((__lf=document.getElementById("libFilter"))&&__lf.value?"&libFilter="+encodeURIComponent(__lf.value):""));')
+    js = rep(js, jg4b_old, jg4b_new, "JG4b")
+
+    # JG4c: 筛选下拉 change 绑定
+    jg4c_old = ('document.getElementById("viewMode").addEventListener("change",'
+                '()=>{let v=document.getElementById("viewMode").value||"large";__setViewMode(v),fe()}),')
+    jg4c_new = (jg4c_old +
+                'document.getElementById("libFilter").addEventListener("change",()=>{n.page=1,w()}),')
+    js = rep(js, jg4c_old, jg4c_new, "JG4c")
+
+    # JG4d: __msBindBar 里加「存为合集」弹窗逻辑
+    jg4d_old = ('let ov=document.getElementById("batchEditOverlay");'
+                'ov&&ov.addEventListener("click",e=>{e.target===e.currentTarget&&(e.currentTarget.hidden=!0)})}')
+    jg4d_new = ('let sc=document.getElementById("msSaveCol");'
+                'sc&&sc.addEventListener("click",()=>{'
+                'if(!window.__sel.size){u("\\u8bf7\\u5148\\u52fe\\u9009\\u4e66\\u7c4d");return}'
+                'let cn=document.getElementById("colName");cn&&(cn.value="");'
+                'let ct2=document.getElementById("colType");ct2&&(ct2.value="collection");'
+                'let oh=document.getElementById("colHint");'
+                'if(oh){let allC=Array.from(window.__sel).every(x=>x.indexOf("__custom_")===0);'
+                'oh.textContent=allC?"\\u5f53\\u524d\\u9009\\u4e2d\\u5747\\u4e3a\\u81ea\\u5b9a\\u4e49\\u5408\\u96c6\\uff0c\\u53ef\\u521b\\u5efa\\u5408\\u96c6\\u5305\\u3002":"\\u5408\\u96c6\\u5305\\u9700\\u8981\\u9009\\u4e2d\\u7684\\u5168\\u90e8\\u662f\\u81ea\\u5b9a\\u4e49\\u5408\\u96c6\\u3002"}'
+                'let ov2=document.getElementById("colOverlay");ov2&&(ov2.hidden=!1)});'
+                'let cc=document.getElementById("colCancel");'
+                'cc&&cc.addEventListener("click",()=>{let o3=document.getElementById("colOverlay");o3&&(o3.hidden=!0)});'
+                'let cx=document.getElementById("colOverlay");'
+                'cx&&cx.addEventListener("click",e=>{e.target===e.currentTarget&&(e.currentTarget.hidden=!0)});'
+                'let cr=document.getElementById("colCreate");'
+                'cr&&cr.addEventListener("click",async()=>{'
+                'let cn=document.getElementById("colName"),ct3=document.getElementById("colType"),o4=document.getElementById("colOverlay");'
+                'let name=cn?cn.value.trim():"";'
+                'if(!name){u("\\u8bf7\\u586b\\u5199\\u5408\\u96c6\\u540d\\u79f0");return}'
+                'let type=ct3?ct3.value:"collection",ids=Array.from(window.__sel);'
+                'try{await y("/api/collections",{method:"POST",body:JSON.stringify({name:name,type:type,ids:ids})});'
+                'u(type==="pack"?"\\u5408\\u96c6\\u5305\\u300c"+name+"\\u300d\\u5df2\\u521b\\u5efa":"\\u5408\\u96c6\\u300c"+name+"\\u300d\\u5df2\\u521b\\u5efa");'
+                'o4&&(o4.hidden=!0);__msSetMode(!1),await w()}catch(e){u("\\u521b\\u5efa\\u5931\\u8d25\\uff1a"+e.message)}});'
+                + jg4d_old)
+    js = rep(js, jg4d_old, jg4d_new, "JG4d")
+
+    # JG4e: 卡片删除按钮 title 加 custom/pack 分支（打散，不删文件）
+    jg4e_old = 'title="${(t.virt==="shorts")?'
+    jg4e_new = ('title="${(t.virt==="custom"||t.virt==="pack")?"\\u6253\\u6563\\u5408\\u96C6\\uFF08\\u4E0D\\u5220\\u9664\\u6587\\u4EF6\\uFF09":(t.virt==="shorts")?')
+    js = rep(js, jg4e_old, jg4e_new, "JG4e")
+
+    # JG4f: 删除确认弹窗警告语加 custom/pack 分支
+    jg4f_old = ('if(b.virt==="shorts"){let n2=(b.memberIds||[]).length;wn.textContent=')
+    jg4f_new = ('if(b.virt==="custom"||b.virt==="pack"){wn.textContent=' + _qs("⚠️ 将打散该合集：成员书籍恢复显示，不会删除任何文件。") + ';}'
+                'else if(b.virt==="shorts"){let n2=(b.memberIds||[]).length;wn.textContent=')
+    js = rep(js, jg4f_old, jg4f_new, "JG4f")
+
+    # JG4g: 删除结果提示加 scatter 分支
+    jg4g_old = 'u(r.collection?('
+    jg4g_new = ("u(r.scatter?(" + _qs("已打散合集「") + "+(t?t.title:\"\")+" + _qs("」，成员书籍已恢复显示") + "):r.collection?(")
+    js = rep(js, jg4g_old, jg4g_new, "JG4g")
+
     # J23: De() 里绑定清空/确认弹窗/跳转按钮（IIFE 隔离作用域，避免变量名冲突）
     j23_old = ("document.getElementById(\"nextPage\").addEventListener(\"click\",()=>{let a=Math.max(1,Math.ceil(n.total/n.pageSize));n.page<a&&(n.page++,w())})")
     j23_new = ("document.getElementById(\"nextPage\").addEventListener(\"click\",()=>{let a=Math.max(1,Math.ceil(n.total/n.pageSize));n.page<a&&(n.page++,w())}),function(){let a=document.getElementById(\"recentClearBtn\");a&&a.addEventListener(\"click\",__clearRecent);let b=document.getElementById(\"confirmOkBtn\");b&&b.addEventListener(\"click\",__runConfirm);let c=document.getElementById(\"confirmCancelBtn\");c&&c.addEventListener(\"click\",__closeConfirm);let d=document.getElementById(\"confirmOverlay\");d&&d.addEventListener(\"click\",e=>{e.target===d&&__closeConfirm()});let f=document.getElementById(\"pageGoBtn\");f&&f.addEventListener(\"click\",__goPage);let g=document.getElementById(\"pageInput\");g&&g.addEventListener(\"keydown\",e=>{\"Enter\"===e.key&&__goPage()})}()")
@@ -2099,6 +2365,12 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
     j46_new = ('document.getElementById("btnRescanBook").addEventListener("click",()=>{__rescanBook(e)}),'
                + j46_old)
     js = rep(js, j46_old, j46_new, "J46")
+
+    # JG4h: 详情页「重新扫描」按钮对虚拟合集（自定义合集/合集包）隐藏（folderRelPath 为空，重扫无意义）
+    jg4h_old = '<button class="btn btn-ghost" id="btnRescanBook" title="\\u91CD\\u65B0\\u626B\\u63CF\\u8BE5\\u4E66\\u76EE\\u5F55">'
+    jg4h_new = ('<button class="btn btn-ghost" id="btnRescanBook" title="\\u91CD\\u65B0\\u626B\\u63CF\\u8BE5\\u4E66\\u76EE\\u5F55"'
+                '${(e.virt==="custom"||e.virt==="pack")?" hidden":""}>')
+    js = rep(js, jg4h_old, jg4h_new, "JG4h")
 
     # J32a: 详情页暂停/倍速按钮的状态同步函数（追加到 cycleSpeed 之后，IIFE 顶层可用）
     j32a_old = ('function se(){let e=[.75,1,1.25,1.5,1.75,2],t=e.indexOf(n.speed);n.speed=e[(t+1)%e.length];'
@@ -2483,7 +2755,9 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         ".bedit-cover { flex: 1; font-size: 13px; color: var(--text); display: flex; align-items: center; gap: 6px; padding-top: 7px; }\n"
         ".bedit-note { font-size: 12px; line-height: 1.6; color: var(--text-2); margin: 10px 0 0; }\n"
         # ---- v1.3.29 修复：重新扫描弹窗加宽（默认 .edit-modal 480px / .delete-modal 420px 放不下目录树）----
-        "#rescanOverlay .edit-modal { max-width: 880px; width: 94%; }\n")
+        "#rescanOverlay .edit-modal { max-width: 880px; width: 94%; }\n"
+        # ---- v1.3.32 第四组：合集弹窗提示 ----
+        ".col-hint { font-size: 12px; color: var(--text-3); margin-top: 6px; }\n")
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     open(css_path, "w", encoding="utf-8", newline="").write(css)
     print("  style.css: +mode-small/mode-list +别名/路径/设置行样式")
