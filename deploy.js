@@ -5,7 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const DEFAULT_HOSTS = 'http://192.168.1.88:8090,http://192.168.1.99:8090';
+const DEFAULT_HOSTS = 'http://192.168.1.69:58090,http://192.168.1.10:58090';
 const HOSTS = (process.argv[2] || DEFAULT_HOSTS)
   .split(',').map(s => s.trim()).filter(Boolean)
   .map(h => (h.startsWith('http') ? h : 'http://' + h));

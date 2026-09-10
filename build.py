@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.36"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.37"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -2026,8 +2026,40 @@ def patch_static(build_dir: str) -> None:
         "function __isMobile(){return window.matchMedia&&window.matchMedia(\"(max-width:768px)\").matches}\n"
         "function __getViewMode(){let d=__isMobile()?\"viewMobile\":\"viewDesktop\";try{let v=localStorage.getItem(d===\"viewMobile\"?\"ab_view_mobile\":\"ab_view_desktop\");if(v===\"large\"||v===\"small\"||v===\"list\")return v}catch(_){}return n.uiPrefs&&n.uiPrefs[d]||\"large\"}\n"
         "function __setViewMode(v){let d=__isMobile()?\"mobile\":\"desktop\";try{localStorage.setItem(\"ab_view_\"+d,v)}catch(_){}}\n"
-        "function __syncViewModeUI(){let s=document.getElementById(\"viewMode\");s&&(s.value=__getViewMode());let pd=document.getElementById(\"prefViewDesktop\");pd&&(pd.value=n.uiPrefs&&n.uiPrefs.viewDesktop||\"large\");let pm=document.getElementById(\"prefViewMobile\");pm&&(pm.value=n.uiPrefs&&n.uiPrefs.viewMobile||\"large\");let pt=document.getElementById(\"prefShortsThreshold\");pt&&!pt.dataset.boundV&&(pt.dataset.boundV=\"1\",pt.addEventListener(\"change\",async()=>{let v=parseInt(pt.value,10)||0;await __savePrefs({shortsMergeThreshold:v});u(v>0?\"\\u5DF2\\u4FDD\\u5B58\\uFF1A\\u9608\\u503C \\u2264\"+v+\" \\u7AE0\\u3002\\u4E0D\\u4F1A\\u81EA\\u52A8\\u626B\\u63CF\\uFF0C\\u70B9\\u300C\\u91CD\\u65B0\\u626B\\u63CF\\u300D\\u5E76\\u9009\\u300C\\u4EC5\\u91CD\\u5EFA\\u5408\\u96C6\\u300D\\u5373\\u53EF\\u751F\\u6548\":\"\\u5DF2\\u5173\\u95ED\\u77ED\\u7BC7\\u5408\\u5E76\\uFF0C\\u70B9\\u300C\\u91CD\\u65B0\\u626B\\u63CF\\u300D\\u5E76\\u9009\\u300C\\u4EC5\\u91CD\\u5EFA\\u5408\\u96C6\\u300D\\u5373\\u53EF\\u89E3\\u6563\\u73B0\\u6709\\u5408\\u96C6\")}));let ip=document.getElementById(\"prefInitScan\");ip&&!ip.dataset.boundV&&(ip.dataset.boundV=\"1\",ip.addEventListener(\"change\",()=>__savePrefs({initScanMode:ip.value})));let hp=document.getElementById(\"prefInitScanHours\");hp&&!hp.dataset.boundV&&(hp.dataset.boundV=\"1\",hp.addEventListener(\"change\",()=>{let v=parseInt(hp.value,10);if(!v||v<1)v=72;hp.value=String(v);__savePrefs({initScanStaleHours:v})}));let cp=document.getElementById(\"editCopyPath\");cp&&!cp.dataset.boundV&&(cp.dataset.boundV=\"1\",cp.addEventListener(\"click\",async()=>{let v=document.getElementById(\"editBookPath\").value||\"\";try{await navigator.clipboard.writeText(v),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(e){let i=document.getElementById(\"editBookPath\");i.focus(),i.select();try{document.execCommand(\"copy\"),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(_){u(\"\\u590D\\u5236\\u5931\\u8D25\\uFF0C\\u8BF7\\u624B\\u52A8\\u9009\\u62E9\\u590D\\u5236\")}}}));try{let mq=window.matchMedia(\"(max-width:768px)\"),h=()=>{__syncViewModeUI(),fe()};mq.addEventListener?mq.addEventListener(\"change\",h):mq.addListener(h)}catch(_){}}\n"
-        "async function __savePrefs(p){n.uiPrefs=Object.assign({viewDesktop:\"large\",viewMobile:\"large\"},n.uiPrefs||{},p),__syncViewModeUI(),fe();try{await y(\"/api/ui-prefs\",{method:\"PUT\",body:JSON.stringify(p),headers:{\"Content-Type\":\"application/json\"}})}catch(e){u(\"\\u4FDD\\u5B58\\u663E\\u793A\\u8BBE\\u7F6E\\u5931\\u8D25\\uFF1A\"+e.message)}}\n"
+        # v1.3.37：设置项持久化修复。原实现只给「合并阈值/自动扫描」绑了 change，
+        #   「默认显示方式」两个下拉只赋值从没绑事件（改了根本不保存）；且打开设置弹窗
+        #   时只读内存 n.uiPrefs，快照未加载完就一直显示默认值。改为：
+        #   ① 打开弹窗主动 GET /api/ui-prefs 拉真实值；② change+input 双事件；
+        #   ③ 关闭弹窗/页面隐藏时全量采集比对后保存（不依赖事件是否触发）。
+        'function __setSel(el,v){if(!el)return;el.value=v;if(el.value!==v){for(var i=0;i<el.options.length;i++){if(el.options[i].value===v){el.selectedIndex=i;try{el.options[i].selected=true}catch(_){}break}}}}\n'
+        'function __prefIds(){return ["prefViewDesktop","prefViewMobile","prefShortsThreshold","prefInitScan","prefInitScanHours"]}\n'
+        'function __prefPatch(el){if(!el)return null;var id=el.id,v=el.value;'
+        'if(id==="prefViewDesktop")return{viewDesktop:v||"large"};\n'
+        'if(id==="prefViewMobile")return{viewMobile:v||"large"};\n'
+        'if(id==="prefShortsThreshold")return{shortsMergeThreshold:parseInt(v,10)||0};\n'
+        'if(id==="prefInitScan")return{initScanMode:v||"stale"};\n'
+        'if(id==="prefInitScanHours"){var q=parseInt(v,10);if(!q||q<1){q=72;el.value="72"}return{initScanStaleHours:q}}\n'
+        'return null}\n'
+        'function __collectPrefs(){var o={},ids=__prefIds();\n'
+        'for(var i=0;i<ids.length;i++){var el=document.getElementById(ids[i]);if(!el)continue;var p=__prefPatch(el);if(p){for(var k in p)o[k]=p[k]}}\n'
+        'return o}\n'
+        'function __bindPrefEvents(){var ids=__prefIds();\n'
+        'for(var i=0;i<ids.length;i++){(function(id){var el=document.getElementById(id);if(!el||el.dataset.boundP)return;\n'
+        'el.dataset.boundP="1";\n'
+        'var f=function(){var p=__prefPatch(el);if(p)__savePrefs(p)};\n'
+        'el.addEventListener("change",f);el.addEventListener("input",f)})(ids[i])}}\n'
+        'function __commitPrefs(){var s=window.__prefsSnap;if(!s)return;window.__prefsSnap=null;\n'
+        'var c=__collectPrefs(),d={},cnt=0;for(var k in c){if(String(c[k])!==String(s[k])){d[k]=c[k];cnt++}}\n'
+        'if(cnt)__savePrefs(d)}\n'
+        'async function __openSettings(){\n'
+        'try{var p=await y("/api/ui-prefs");if(p){n.uiPrefs=Object.assign({viewDesktop:"large",viewMobile:"large",shortsMergeThreshold:4,initScanMode:"stale",initScanStaleHours:72},n.uiPrefs||{},p)}}catch(_){}\n'
+        'try{__syncViewModeUI()}catch(_){}\n'
+        'try{__bindPrefEvents()}catch(_){}\n'
+        'try{window.__prefsSnap=__collectPrefs()}catch(_){window.__prefsSnap=null}}\n'
+        'try{window.addEventListener("pagehide",function(){try{__commitPrefs()}catch(_){}})}catch(_){}\n'
+        'try{document.addEventListener("visibilitychange",function(){if(document.visibilityState==="hidden"){try{__commitPrefs()}catch(_){}}})}catch(_){}\n'
+        "function __syncViewModeUI(){let s=document.getElementById(\"viewMode\");s&&(s.value=__getViewMode());let pd=document.getElementById(\"prefViewDesktop\");pd&&__setSel(pd,n.uiPrefs&&n.uiPrefs.viewDesktop||\"large\");let pm=document.getElementById(\"prefViewMobile\");pm&&__setSel(pm,n.uiPrefs&&n.uiPrefs.viewMobile||\"large\");let pt=document.getElementById(\"prefShortsThreshold\");pt&&!pt.dataset.boundV&&(pt.dataset.boundV=\"1\",pt.addEventListener(\"change\",async()=>{let v=parseInt(pt.value,10)||0;await __savePrefs({shortsMergeThreshold:v});u(v>0?\"\\u5DF2\\u4FDD\\u5B58\\uFF1A\\u9608\\u503C \\u2264\"+v+\" \\u7AE0\\u3002\\u4E0D\\u4F1A\\u81EA\\u52A8\\u626B\\u63CF\\uFF0C\\u70B9\\u300C\\u91CD\\u65B0\\u626B\\u63CF\\u300D\\u5E76\\u9009\\u300C\\u4EC5\\u91CD\\u5EFA\\u5408\\u96C6\\u300D\\u5373\\u53EF\\u751F\\u6548\":\"\\u5DF2\\u5173\\u95ED\\u77ED\\u7BC7\\u5408\\u5E76\\uFF0C\\u70B9\\u300C\\u91CD\\u65B0\\u626B\\u63CF\\u300D\\u5E76\\u9009\\u300C\\u4EC5\\u91CD\\u5EFA\\u5408\\u96C6\\u300D\\u5373\\u53EF\\u89E3\\u6563\\u73B0\\u6709\\u5408\\u96C6\")}));let ip=document.getElementById(\"prefInitScan\");ip&&!ip.dataset.boundV&&(ip.dataset.boundV=\"1\",ip.addEventListener(\"change\",()=>__savePrefs({initScanMode:ip.value})));let hp=document.getElementById(\"prefInitScanHours\");hp&&!hp.dataset.boundV&&(hp.dataset.boundV=\"1\",hp.addEventListener(\"change\",()=>{let v=parseInt(hp.value,10);if(!v||v<1)v=72;hp.value=String(v);__savePrefs({initScanStaleHours:v})}));let cp=document.getElementById(\"editCopyPath\");cp&&!cp.dataset.boundV&&(cp.dataset.boundV=\"1\",cp.addEventListener(\"click\",async()=>{let v=document.getElementById(\"editBookPath\").value||\"\";try{await navigator.clipboard.writeText(v),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(e){let i=document.getElementById(\"editBookPath\");i.focus(),i.select();try{document.execCommand(\"copy\"),u(\"\\u5DF2\\u590D\\u5236\\u8DEF\\u5F84\")}catch(_){u(\"\\u590D\\u5236\\u5931\\u8D25\\uFF0C\\u8BF7\\u624B\\u52A8\\u9009\\u62E9\\u590D\\u5236\")}}}));try{let mq=window.matchMedia(\"(max-width:768px)\"),h=()=>{__syncViewModeUI(),fe()};mq.addEventListener?mq.addEventListener(\"change\",h):mq.addListener(h)}catch(_){}}\n"
+        "async function __savePrefs(p){n.uiPrefs=Object.assign({viewDesktop:\"large\",viewMobile:\"large\"},n.uiPrefs||{},p);if(p.viewDesktop&&!__isMobile()){try{localStorage.removeItem(\"ab_view_desktop\")}catch(_){}}if(p.viewMobile&&__isMobile()){try{localStorage.removeItem(\"ab_view_mobile\")}catch(_){}}__syncViewModeUI(),fe();try{await y(\"/api/ui-prefs\",{method:\"PUT\",body:JSON.stringify(p),headers:{\"Content-Type\":\"application/json\"}})}catch(e){u(\"\\u4FDD\\u5B58\\u663E\\u793A\\u8BBE\\u7F6E\\u5931\\u8D25\\uFF1A\"+e.message)}}\n"
         "function __relPath(p){if(!p)return\"\";let lp=String(n.libraryPath||\"/app/audiobook\").replace(/\\/+$/,\"\");return p===lp?\"\":p.indexOf(lp+\"/\")===0?p.substring(lp.length+1):p}\n"
         "async function __saveRate(id,rate){if(!id)return;n.playbackRates=n.playbackRates||{};n.playbackRates[id]=rate;try{localStorage.setItem(\"ab_rate_\"+id,String(rate))}catch(_){}try{await y(\"/api/books/\"+id+\"/rate\",{method:\"POST\",body:JSON.stringify({rate:rate}),headers:{\"Content-Type\":\"application/json\"}})}catch(_){}}\n"
         "function __restoreRate(id){if(!id)return;let v=0;try{v=parseFloat(localStorage.getItem(\"ab_rate_\"+id))}catch(_){}if(!v||isNaN(v))v=(n.playbackRates||{})[id]||0;if(!v)v=1;if([.75,1,1.25,1.5,1.75,2].indexOf(v)<0)v=1;n.speed=v;let o=document.getElementById(\"btnSpeedFull\");o&&(o.textContent=v+\"x\");let r=n.audioEl||b();r&&(r.playbackRate=v)}\n"
@@ -2073,8 +2105,16 @@ def patch_static(build_dir: str) -> None:
     j4_old = ("function ge(){let e=document.getElementById(\"settingsOverlay\");"
               "e&&(e.hidden=!1,he(),Re())}")
     j4_new = ("function ge(){let e=document.getElementById(\"settingsOverlay\");"
-              "e&&(__syncViewModeUI(),e.hidden=!1,he(),Re())}")
+              "e&&(e.hidden=!1,he(),Re(),__openSettings())}")
     js = rep(js, j4_old, j4_new, "J4")
+
+    # J4b: 关闭设置弹窗时兜底保存（v1.3.37）——读 DOM 当前值与打开时快照比对，
+    #     有差异就保存。这样即使 WebF 未触发 change/input 事件也不会丢设置。
+    j4b_old = ("function ee(){let e=document.getElementById(\"settingsOverlay\");"
+              "e&&(e.hidden=!0)}")
+    j4b_new = ("function ee(){let e=document.getElementById(\"settingsOverlay\");"
+              "if(!e)return;e.hidden=!0;try{__commitPrefs()}catch(_){}}")
+    js = rep(js, j4b_old, j4b_new, "J4b")
 
     # J5: 编辑弹窗打开时填充别名 / 原名提示 / 书籍路径
     j5_old = ("function Fe(e){Q=e.id,"
