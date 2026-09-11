@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.41"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.48"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -2012,6 +2012,9 @@ def patch_static(build_dir: str) -> None:
                 '      </label>\n')
     html = rep(html, hg4b_old, hg4b_new, "HG4b")
 
+    # H_REORDER: 已移除（v1.3.43）——「调序/自定义顺序」改为做在书籍详情的「章节列表」上，
+    #   不在首页书本列表加按钮。相关补丁见 J_CHAPTER_*。
+
     open(html_path, "w", encoding="utf-8", newline="").write(html)
     print("  index.html: +显示方式/顺序下拉 +别名字段 +路径复制 +设置默认显示方式")
 
@@ -2843,6 +2846,147 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
     j37_new = 'document.getElementById("btnPlayFirst").addEventListener("click",()=>{n.currentBook&&n.currentBook.chapters.length&&B(n.currentBook,n.currentBook.chapters[0],!1),__syncDetailSpeed();}),'
     js = rep(js, j37_old, j37_new, "J37")
 
+    # ===== v1.3.42 自定义顺序 / 调序（前端）=====
+    # 仅前端 + localStorage，不改动后端 jsc：
+    #   - 调序按钮：点击进入拖动排序态（高亮列表），再次点击结束并保存为自定义顺序。
+    #   - 自定义顺序按钮：在“默认/正序/逆序”之外切换一个“自定义顺序”显示模式，
+    #     按已保存的自定义顺序重排当前页（全局 id 顺序数组持久化在 localStorage）。
+    #   - 列表服务端分页(24/页)，拖动只重排当前可见页；保存时把当前页 id 序列并入
+    #     全局自定义顺序数组，跨页累积。切换 顺序 select 会退出自定义顺序模式。
+    j_reorder_oe = "function Oe(){b(),De(),k(\"homeView\"),X(),function(){try{__syncViewModeUI()}catch(_){}}(),Y()}"
+    j_reorder_helpers = (
+        "/* ===== v1.3.42 自定义顺序 / 调序 ===== */\n"
+        "function __loadCustomOrder(){try{var s=window.localStorage.getItem('ab_custom_order_v1');window.__customOrder=s?JSON.parse(s):[]}catch(_){window.__customOrder=[]}}\n"
+        "function __persistCustomOrder(){try{window.localStorage.setItem('ab_custom_order_v1',JSON.stringify(window.__customOrder||[]))}catch(_){}}\n"
+        "function __closestCard(node){while(node&&node!==document){if(node.classList&&node.classList.contains('book-card'))return node;node=node.parentNode}return null}\n"
+        "function __saveCustomOrderFromDOM(){var grid=document.getElementById('bookGrid');if(!grid)return;var ids=Array.prototype.slice.call(grid.querySelectorAll('.book-card')).map(function(c){return c.getAttribute('data-id')});if(!ids.length)return;var arr=window.__customOrder?window.__customOrder.slice():[];var pageSet={};ids.forEach(function(id){pageSet[id]=1});var rest=arr.filter(function(id){return !pageSet[id]});var anchor=-1;for(var k=0;k<arr.length;k++){if(pageSet[arr[k]]){anchor=k;break}}if(anchor<0)anchor=rest.length;var before=rest.slice(0,anchor),after=rest.slice(anchor);window.__customOrder=before.concat(ids,after);var seen={};window.__customOrder.forEach(function(id){seen[id]=1});(n.books||[]).forEach(function(b){if(!seen[b.id]){window.__customOrder.push(b.id);seen[b.id]=1}});__persistCustomOrder();window.__customActive=true}\n"
+        "var __dragEl=null,__dragActive=false,__dragStartY=0,__dragStartX=0,__dragStarted=false;\n"
+        "function __onDragStart(e){if(!window.__reorderMode)return;var el=__closestCard(e.target);if(!el)return;if(e.type==='touchstart'&&e.cancelable)e.preventDefault();if(__dragActive)return;__dragEl=el;__dragActive=true;__dragStarted=false;var pt=e.touches?e.touches[0]:e;__dragStartY=pt.clientY;__dragStartX=pt.clientX}\n"
+        "function __onDragMove(e){if(!__dragActive||!__dragEl)return;var pt=e.touches?e.touches[0]:e;var dy=pt.clientY-__dragStartY,dx=pt.clientX-__dragStartX;if(!__dragStarted){if(Math.abs(dy)+Math.abs(dx)<6)return;__dragStarted=true;__dragEl.classList.add('dragging');__dragEl.style.zIndex='50';__dragEl.style.width=__dragEl.offsetWidth+'px';__dragEl.style.transition='none';__dragEl.style.position='relative'}if(e.cancelable)e.preventDefault();__dragEl.style.transform='translate('+dx+'px,'+dy+'px)'}\n"
+        "function __onDragEnd(e){if(!__dragActive)return;__dragActive=false;var grid=__dragEl&&__dragEl.parentNode;if(__dragEl&&__dragStarted&&grid){var pt=e.changedTouches?e.changedTouches[0]:e;var cards=Array.prototype.slice.call(grid.children).filter(function(c){return c!==__dragEl});var target=null;for(var i=0;i<cards.length;i++){var r=cards[i].getBoundingClientRect();var mid=r.top+r.height/2;if(pt.clientY<mid){target=cards[i];break}}if(target)grid.insertBefore(__dragEl,target);else grid.appendChild(__dragEl)}if(__dragEl){__dragEl.classList.remove('dragging');__dragEl.style.transform='';__dragEl.style.zIndex='';__dragEl.style.width='';__dragEl.style.transition='';__dragEl.style.position=''}__dragEl=null;__dragStarted=false}\n"
+        "function __toggleReorder(){window.__reorderMode=!window.__reorderMode;var grid=document.getElementById('bookGrid'),btn=document.getElementById('btnReorder');if(window.__reorderMode){grid&&grid.classList.add('reordering');btn&&(btn.classList.add('active'),btn.textContent='结束调序');__bindDrag();u('已进入调序：拖动书籍调整顺序，点「结束调序」保存');window.__customActive=false;var bc=document.getElementById('btnCustomOrder');bc&&bc.classList.remove('active')}else{grid&&grid.classList.remove('reordering');btn&&(btn.classList.remove('active'),btn.textContent='调序');__saveCustomOrderFromDOM();var bc=document.getElementById('btnCustomOrder');bc&&bc.classList.add('active');fe();u('已保存为自定义顺序')}}\n"
+        "function __toggleCustom(){var btn=document.getElementById('btnCustomOrder');if(!window.__customOrder||!window.__customOrder.length){u('请先点击「调序」拖动排列并保存');return}window.__customActive=!window.__customActive;if(window.__customActive){btn&&btn.classList.add('active');u('已按自定义顺序显示')}else{btn&&btn.classList.remove('active');u('已恢复默认顺序')}fe()}\n"
+        "function __bindDrag(){var grid=document.getElementById('bookGrid');if(!grid||grid.dataset.boundD)return;grid.dataset.boundD='1';grid.addEventListener('touchstart',__onDragStart,{passive:false});grid.addEventListener('mousedown',__onDragStart);if(window.PointerEvent)grid.addEventListener('pointerdown',__onDragStart);document.addEventListener('touchmove',__onDragMove,{passive:false});document.addEventListener('mousemove',__onDragMove);if(window.PointerEvent)document.addEventListener('pointermove',__onDragMove,{passive:false});document.addEventListener('touchend',__onDragEnd);document.addEventListener('mouseup',__onDragEnd);if(window.PointerEvent)document.addEventListener('pointerup',__onDragEnd);grid.addEventListener('click',function(e){if(window.__reorderMode){e.stopPropagation();e.preventDefault()}},true)}\n"
+        "function __bindReorderUI(){__loadCustomOrder();var r=document.getElementById('btnReorder');r&&r.addEventListener('click',__toggleReorder);var c=document.getElementById('btnCustomOrder');c&&c.addEventListener('click',__toggleCustom);var so=document.getElementById('sortOrder');if(so)so.addEventListener('change',function(){if(window.__customActive){window.__customActive=false;var b=document.getElementById('btnCustomOrder');b&&b.classList.remove('active')}})}\n"
+    )
+    # ===== v1.3.43 章节自定义顺序 / 调序（前端，做在书籍详情的章节列表上）=====
+    # 仅前端 + localStorage，不改动后端 jsc：
+    #   - 章节列表标题栏加「调序」「自定义顺序」按钮（在 正序/倒序 左侧）。
+    #   - 调序：点击高亮章节列表进入拖动态，再次点击结束并把当前顺序存入
+    #     localStorage['ab_chapter_order_v1'][bookId]，同时激活「自定义顺序」。
+    #   - 自定义顺序：按已保存的该本书章节顺序显示；每本书独立。
+    #   - WebF 不支持 HTML5 DnD，用 pointer/touch/mouse 事件手动计算插入位置。
+    j_chapter_oe = j_reorder_oe
+    j_chapter_helpers = (
+        "/* ===== v1.3.43 章节自定义顺序 / 调序 ===== */\n"
+        "function __loadChapterOrder(){try{var s=window.localStorage.getItem('ab_chapter_order_v1');window.__chapterOrder=s?JSON.parse(s):{}}catch(_){window.__chapterOrder={}}}\n"
+        "function __persistChapterOrder(){try{window.localStorage.setItem('ab_chapter_order_v1',JSON.stringify(window.__chapterOrder||{}))}catch(_){}}\n"
+        "function __closestChapterRow(node){while(node&&node!==document){if(node.classList&&node.classList.contains('chapter-row'))return node;node=node.parentNode}return null}\n"
+        "function __saveChapterOrderFromDOM(e){var body=document.querySelector('.chapter-list-body');if(!body)return;var ids=Array.prototype.slice.call(body.querySelectorAll('.chapter-row')).map(function(c){return c.getAttribute('data-chapter')});if(!ids.length)return;if(!window.__chapterOrder)window.__chapterOrder={};window.__chapterOrder[e.id]=ids;__persistChapterOrder();window.__chapterCustomActive=true}\n"
+        "var __chDragEl=null,__chDragActive=false,__chDragStartY=0,__chDragStartX=0,__chDragStarted=false;\n"
+        "function __onChapterDragStart(e){if(!window.__chapterReorderMode)return;var el=__closestChapterRow(e.target);if(!el)return;if(e.type==='touchstart'&&e.cancelable)e.preventDefault();if(__chDragActive)return;__chDragEl=el;__chDragActive=true;__chDragStarted=false;var pt=e.touches?e.touches[0]:e;__chDragStartY=pt.clientY;__chDragStartX=pt.clientX}\n"
+        "function __onChapterDragMove(e){if(!__chDragActive||!__chDragEl)return;var pt=e.touches?e.touches[0]:e;var dy=pt.clientY-__chDragStartY,dx=pt.clientX-__chDragStartX;if(!__chDragStarted){if(Math.abs(dy)+Math.abs(dx)<6)return;__chDragStarted=true;__chDragEl.classList.add('dragging');__chDragEl.style.zIndex='50';__chDragEl.style.width=__chDragEl.offsetWidth+'px';__chDragEl.style.transition='none';__chDragEl.style.position='relative'}if(e.cancelable)e.preventDefault();__chDragEl.style.transform='translate('+dx+'px,'+dy+'px)'}\n"
+        "function __onChapterDragEnd(e){if(!__chDragActive)return;__chDragActive=false;var body=__chDragEl&&__chDragEl.parentNode;if(__chDragEl&&__chDragStarted&&body){var pt=e.changedTouches?e.changedTouches[0]:e;var rows=Array.prototype.slice.call(body.children).filter(function(c){return c!==__chDragEl});var target=null;for(var i=0;i<rows.length;i++){var r=rows[i].getBoundingClientRect();var mid=r.top+r.height/2;if(pt.clientY<mid){target=rows[i];break}}if(target)body.insertBefore(__chDragEl,target);else body.appendChild(__chDragEl)}if(__chDragEl){__chDragEl.classList.remove('dragging');__chDragEl.style.transform='';__chDragEl.style.zIndex='';__chDragEl.style.width='';__chDragEl.style.transition='';__chDragEl.style.position=''}__chDragEl=null;__chDragStarted=false}\n"
+        "function __bindChapterDrag(){var body=document.querySelector('.chapter-list-body');if(!body||body.dataset.boundCD)return;body.dataset.boundCD='1';body.addEventListener('touchstart',__onChapterDragStart,{passive:false});body.addEventListener('mousedown',__onChapterDragStart);if(window.PointerEvent)body.addEventListener('pointerdown',__onChapterDragStart);body.addEventListener('click',function(e){if(window.__chapterReorderMode){e.stopPropagation();e.preventDefault()}},true);if(window.__chapterDocBound)return;window.__chapterDocBound=1;document.addEventListener('touchmove',__onChapterDragMove,{passive:false});document.addEventListener('mousemove',__onChapterDragMove);if(window.PointerEvent)document.addEventListener('pointermove',__onChapterDragMove,{passive:false});document.addEventListener('touchend',__onChapterDragEnd);document.addEventListener('mouseup',__onChapterDragEnd);if(window.PointerEvent)document.addEventListener('pointerup',__onChapterDragEnd)}\n"
+        "function __domChapterIds(){var body=document.querySelector('.chapter-list-body');if(!body)return[];return Array.prototype.slice.call(body.querySelectorAll('.chapter-row')).map(function(c){return c.getAttribute('data-chapter')})}\n"
+        "function __toggleChapterReorder(e){window.__chapterReorderMode=!window.__chapterReorderMode;var list=document.querySelector('.chapter-list'),btn=document.getElementById('chapterReorderBtn');if(window.__chapterReorderMode){list&&list.classList.add('reordering');btn&&(btn.classList.add('active'),btn.textContent='结束调序');__bindChapterDrag();window.__chapterSortPreview=false;u('已进入调序：拖动章节调整顺序，结束后点「更新章节表」保存为播放顺序')}else{list&&list.classList.remove('reordering');btn&&(btn.classList.remove('active'),btn.textContent='调序');u('已退出调序：点「更新章节表」即可按当前顺序播放')}}\n"
+        "function __updateChapterTable(e){var ids=__domChapterIds();if(!ids.length)ids=e.chapters.map(function(c){return c.id});if(!window.__chapterOrder)window.__chapterOrder={};window.__chapterOrder[e.id]=ids;__persistChapterOrder();window.__chapterSortPreview=false;if(window.__chapterReorderMode){window.__chapterReorderMode=false;var list=document.querySelector('.chapter-list');list&&list.classList.remove('reordering');var rb=document.getElementById('chapterReorderBtn');rb&&(rb.classList.remove('active'),rb.textContent='调序')}K(e);u('已更新章节表：将按当前列表顺序播放（列表顺序=播放顺序）')}\n"
+        "function __effChapters(book,asc){var ch=book&&book.chapters||[];if(window.__chapterOrder&&window.__chapterOrder[book.id]&&window.__chapterOrder[book.id].length){var rk=window.__chapterOrder[book.id],map={},arr=[],seen={};ch.forEach(function(c){map[c.id]=c});rk.forEach(function(id){if(map[id]){arr.push(map[id]);seen[id]=1}});ch.forEach(function(c){if(!seen[c.id])arr.push(c)});return arr}return ch.slice().sort(function(a,b){return asc?a.index-b.index:b.index-a.index})}\n"
+    )
+    js = rep(js, j_chapter_oe, j_chapter_helpers + j_chapter_oe, "J_CHAPTER_HELPERS")
+
+    # J_CHAPTER_SORT: K(e) 渲染章节时按自定义顺序排序
+    j_chapter_sort_old = 'a=[...e.chapters].sort((i,s)=>n.chapterSortOrder==="asc"?i.index-s.index:s.index-i.index);'
+    j_chapter_sort_new = ('a=[...e.chapters].sort((i,s)=>n.chapterSortOrder==="asc"?i.index-s.index:s.index-i.index);'
+        'if(!window.__chapterOrderLoaded){__loadChapterOrder();window.__chapterOrderLoaded=1}'
+        'if(window.__chapterReorderMode){let __ids=__domChapterIds();if(__ids.length){let __m={},__arr=[];a.forEach(function(c){__m[c.id]=c});__ids.forEach(function(id){if(__m[id])__arr.push(__m[id])});a=__arr}}'
+        'else if(window.__chapterSortPreview){a=[...e.chapters].sort((i,s)=>n.chapterSortOrder==="asc"?i.index-s.index:s.index-i.index)}'
+        'else if(window.__chapterOrder[e.id]&&window.__chapterOrder[e.id].length){let rk=window.__chapterOrder[e.id],__m={},__arr=[],__seen={};a.forEach(function(c){__m[c.id]=c});rk.forEach(function(id){if(__m[id]){__arr.push(__m[id]);__seen[id]=1}});a.forEach(function(c){if(!__seen[c.id])__arr.push(c)});a=__arr}')
+    js = rep(js, j_chapter_sort_old, j_chapter_sort_new, "J_CHAPTER_SORT")
+
+    # J_CHAPTER_INDEX: 章节序号改为「当前显示顺序的位置」（从上到下 1..n），
+    #   用户点「更新章节表」重排后序号自动递增，等于播放顺序序号。
+    j_chapter_index_old = '<div class="chapter-index">${String(i.index).padStart(3,"0")}</div>'
+    j_chapter_index_new = '<div class="chapter-index">${String(__pos+1).padStart(3,"0")}</div>'
+    js = rep(js, j_chapter_index_old, j_chapter_index_new, "J_CHAPTER_INDEX")
+    j_chapter_map_old = '${a.map(i=>'
+    j_chapter_map_new = '${a.map((i,__pos)=>'
+    js = rep(js, j_chapter_map_old, j_chapter_map_new, "J_CHAPTER_MAP")
+
+    # J_CHAPTER_HEADER: 章节列表标题栏按钮（顺序：正序/倒序 → 调序 → 更新章节表）
+    j_chapter_header_old = '        \\u7AE0\\u8282\\u5217\\u8868\\uFF08${e.chapters.length}\\uFF09\n        <button class="btn btn-ghost chapter-sort-btn" id="chapterSortToggle">'
+    j_chapter_header_new = ('        \\u7AE0\\u8282\\u5217\\u8868\\uFF08${e.chapters.length}\\uFF09\n'
+        '        <span class="chapter-list-actions">\n'
+        '          <button class="btn btn-ghost chapter-sort-btn" id="chapterSortToggle">')
+    js = rep(js, j_chapter_header_old, j_chapter_header_new, "J_CHAPTER_HEADER")
+
+    # J_CHAPTER_HEADER_CLOSE: 把三个按钮包进右对齐容器
+    j_chapter_header_close_old = '</button>\n      </div>\n      <div class="chapter-list-body">'
+    j_chapter_header_close_new = '</button>\n          <button class="btn btn-ghost" id="chapterReorderBtn" title="点击进入拖动排序；拖动调整章节顺序后，点「更新章节表」保存为播放顺序">调序</button>\n          <button class="btn btn-ghost" id="chapterUpdateTableBtn" title="把当前列表顺序保存为播放顺序（列表顺序即播放顺序）">更新章节表</button>\n        </span>\n      </div>\n      <div class="chapter-list-body">'
+    js = rep(js, j_chapter_header_close_old, j_chapter_header_close_new, "J_CHAPTER_HEADER_CLOSE")
+
+    # J_CHAPTER_BIND: 绑定两个新按钮的点击事件
+    j_chapter_bind_old = 'document.getElementById("chapterSortToggle").addEventListener("click",()=>{n.chapterSortOrder=n.chapterSortOrder==="asc"?"desc":"asc",K(e)})'
+    j_chapter_bind_new = ('document.getElementById("chapterSortToggle").addEventListener("click",()=>{n.chapterSortOrder=n.chapterSortOrder==="asc"?"desc":"asc",window.__chapterSortPreview=true,K(e)}),'
+        'document.getElementById("chapterReorderBtn").addEventListener("click",()=>__toggleChapterReorder(e)),'
+        'document.getElementById("chapterUpdateTableBtn").addEventListener("click",()=>__updateChapterTable(e))')
+    js = rep(js, j_chapter_bind_old, j_chapter_bind_new, "J_CHAPTER_BIND")
+
+    # J_CHAPTER_PLAYORDER: 让播放顺序（上一章/下一章/自动连播/播放列表）也遵循自定义顺序
+    #   __effChapters(book, asc) 在「自定义顺序」激活时返回按保存顺序排好的章节数组，
+    #   否则按 index 升/降序（与原行为一致）。下面 5 处原本直接用 e.chapters（原始 index 顺序），
+    #   全部替换为 __effChapters(...)，实现「列表顺序 = 播放顺序」。
+    j_po_re_old = 'let o=[...e.chapters].sort((a,i)=>n.playlistSortAsc?a.index-i.index:i.index-a.index);'
+    j_po_re_new = 'let o=__effChapters(e,n.playlistSortAsc);'
+    js = rep(js, j_po_re_old, j_po_re_new, "J_CHAPTER_PLAYORDER_RE")
+
+    j_po_ne_old = 'let e=n.currentBookForPlayer.chapters,t=e.findIndex(i=>i.id===n.currentChapter.id);if(t<0||t>=e.length-1)return;let o=e[t+1],r="";'
+    j_po_ne_new = 'let e=__effChapters(n.currentBookForPlayer,n.chapterSortOrder==="asc"),t=e.findIndex(i=>i.id===n.currentChapter.id);if(t<0||t>=e.length-1)return;let o=e[t+1],r="";'
+    js = rep(js, j_po_ne_old, j_po_ne_new, "J_CHAPTER_PLAYORDER_NE")
+
+    j_po_ae_old = 'let e=n.currentBookForPlayer.chapters,t=e.findIndex(o=>o.id===n.currentChapter.id);t>0&&B(n.currentBookForPlayer,e[t-1],!1)'
+    j_po_ae_new = 'let e=__effChapters(n.currentBookForPlayer,n.chapterSortOrder==="asc"),t=e.findIndex(o=>o.id===n.currentChapter.id);t>0&&B(n.currentBookForPlayer,e[t-1],!1)'
+    js = rep(js, j_po_ae_old, j_po_ae_new, "J_CHAPTER_PLAYORDER_AE")
+
+    j_po_ie_old = 'let e=n.currentBookForPlayer.chapters,t=e.findIndex(o=>o.id===n.currentChapter.id);t>=0&&t<e.length-1&&B(n.currentBookForPlayer,e[t+1],!1)'
+    j_po_ie_new = 'let e=__effChapters(n.currentBookForPlayer,n.chapterSortOrder==="asc"),t=e.findIndex(o=>o.id===n.currentChapter.id);t>=0&&t<e.length-1&&B(n.currentBookForPlayer,e[t+1],!1)'
+    js = rep(js, j_po_ie_old, j_po_ie_new, "J_CHAPTER_PLAYORDER_IE")
+
+    j_po_sleep_old = 'let t=n.currentBookForPlayer.chapters,o=t.findIndex(r=>r.id===n.currentChapter.id);o>=0&&o<t.length-1&&B(n.currentBookForPlayer,t[o+1],!1)'
+    j_po_sleep_new = 'let t=__effChapters(n.currentBookForPlayer,n.chapterSortOrder==="asc"),o=t.findIndex(r=>r.id===n.currentChapter.id);o>=0&&o<t.length-1&&B(n.currentBookForPlayer,t[o+1],!1)'
+    js = rep(js, j_po_sleep_old, j_po_sleep_new, "J_CHAPTER_PLAYORDER_SLEEP")
+
+    # J_CHAPTER_PLAYORDER_R: 打开书籍时若无续播章节，从「自定义顺序的第一章」开始（列表顺序=播放顺序）
+    j_po_r_old = 'let a=o?r.chapters.find(i=>i.id===o):r.chapters[0];'
+    j_po_r_new = 'let a=o?__effChapters(r,n.chapterSortOrder==="asc").find(i=>i.id===o):__effChapters(r,n.chapterSortOrder==="asc")[0];'
+    js = rep(js, j_po_r_old, j_po_r_new, "J_CHAPTER_PLAYORDER_R")
+
+    # J_PLAYLIST_INDEX: 播放器底部「播放列表」里的序号也改为当前播放顺序的位置（1..n）
+    j_playlist_index_old = 't.innerHTML=o.map(a=>`\n      <div class="chapter-row ${n.currentChapter&&a.id===n.currentChapter.id?"active":""}" data-chapter="${a.id}">\n        <div class="chapter-row-left">\n          <div class="chapter-index">${String(a.index).padStart(3,"0")}</div>'
+    j_playlist_index_new = 't.innerHTML=o.map((a,pos)=>`\n      <div class="chapter-row ${n.currentChapter&&a.id===n.currentChapter.id?"active":""}" data-chapter="${a.id}">\n        <div class="chapter-row-left">\n          <div class="chapter-index">${String(pos+1).padStart(3,"0")}</div>'
+    js = rep(js, j_playlist_index_old, j_playlist_index_new, "J_PLAYLIST_INDEX")
+
+    # J_RESUME_RECENT: 详情页「▶ 继续播放」改为播「上次正在听的那章」（走最近播放记录）；
+    #   优先级：最近播放记录该书第一条 → 原最大未完成进度章节 → 更新章节表后顺序的第一章
+    j_resume_old = 'document.getElementById("btnResume").addEventListener("click",()=>{let bk=n.currentBook;if(!bk||!bk.chapters||!bk.chapters.length)return;let tg=null,mx=0;for(let i=0;i<bk.chapters.length;i++){let c=bk.chapters[i];let p=c.progress&&!c.progress.completed?(c.progress.position||0):0;if(p>mx){mx=p;tg=c;}}if(!tg)tg=bk.chapters[0];B(bk,tg,!1),__syncDetailSpeed();})'
+    j_resume_new = 'document.getElementById("btnResume").addEventListener("click",()=>{let bk=n.currentBook;if(!bk||!bk.chapters||!bk.chapters.length)return;(async()=>{let tg=null;try{let its=((await y("/api/recently-played")).items)||[],rc=its.find(r=>r.bookId===bk.id);if(rc)tg=bk.chapters.find(c=>c.id===rc.chapterId)||null}catch(_){}if(!tg){let mx=0;for(let i=0;i<bk.chapters.length;i++){let c=bk.chapters[i];let p=c.progress&&!c.progress.completed?(c.progress.position||0):0;if(p>mx){mx=p;tg=c;}}}if(!tg)tg=__effChapters(bk,n.chapterSortOrder==="asc")[0];B(bk,tg,!1),__syncDetailSpeed();})()})'
+    js = rep(js, j_resume_old, j_resume_new, "J_RESUME_RECENT")
+
+    # J_PLAYFIRST_ORDER: 详情页「▶ 从第一集播放」改为按「更新章节表」后的顺序取第一章
+    j_playfirst_old = 'btnPlayFirst").addEventListener("click",()=>{n.currentBook&&n.currentBook.chapters.length&&B(n.currentBook,n.currentBook.chapters[0],!1),__syncDetailSpeed();})'
+    j_playfirst_new = 'btnPlayFirst").addEventListener("click",()=>{n.currentBook&&n.currentBook.chapters.length&&B(n.currentBook,__effChapters(n.currentBook,n.chapterSortOrder==="asc")[0],!1),__syncDetailSpeed();})'
+    js = rep(js, j_playfirst_old, j_playfirst_new, "J_PLAYFIRST_ORDER")
+
+    j_reorder_boot_old = 'document.getElementById("btnCleanCache").addEventListener("click",ve)}'
+    j_reorder_boot_new = 'document.getElementById("btnCleanCache").addEventListener("click",ve);__bindReorderUI();}'
+    # (removed v1.3.43) J_REORDER_BOOT 不再需要：首页「调序/自定义顺序」已移除
+    # js = rep(js, j_reorder_boot_old, j_reorder_boot_new, "J_REORDER_BOOT")
+
+    j_reorder_fe_old = '__vm!=="large"&&e.classList.add("mode-"+__vm);if(!n.books.length){e.innerHTML="";return}e.innerHTML=n.books.map(t=>'
+    j_reorder_fe_new = '__vm!=="large"&&e.classList.add("mode-"+__vm);if(!n.books.length){e.innerHTML="";return}let __list=n.books;if(window.__customActive&&window.__customOrder&&window.__customOrder.length){let __rk=window.__customOrder;__list=n.books.slice().sort(function(a,b){let ra=__rk.indexOf(a.id);if(ra<0)ra=1e12;let rb=__rk.indexOf(b.id);if(rb<0)rb=1e12;return ra-rb})}e.innerHTML=__list.map(t=>'
+    # (removed v1.3.43) J_REORDER_FE 不再需要：首页列表自定义顺序已移除
+    # js = rep(js, j_reorder_fe_old, j_reorder_fe_new, "J_REORDER_FE")
+
     open(js_path, "w", encoding="utf-8", newline="").write(js)
     # 前端语法自检：minified 单行 bundle 里的语法错误（如逗号表达式中插入 var 语句）
     # 必须在构建阶段拦下，否则只在浏览器运行时静默抛 SyntaxError、整个前端不工作。
@@ -3035,6 +3179,16 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         ".sc-list .sc-item { display: block; margin: 0; padding: 5px 0; cursor: pointer; font-size: 13px; color: var(--text); line-height: 1.4; }\n"
         ".sc-item input { display: inline-block; vertical-align: middle; width: 16px; height: 16px; margin: 0 8px 0 0; flex: none; }\n"
         ".sc-item span { display: inline-block; vertical-align: middle; max-width: calc(100% - 28px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n")
+    css = css + (
+        "\n\n"
+        "/* ===== v1.3.46 章节自定义顺序 / 调序 / 更新章节表 ===== */\n"
+        ".btn.active{background:var(--primary,#3b82f6);color:#fff;border-color:var(--primary,#3b82f6)}\n"
+        ".chapter-list-actions{display:flex;align-items:center;gap:8px;margin-left:auto}\n"
+        "button[title]{cursor:help}\n"
+        ".chapter-list.reordering{outline:2px dashed var(--primary,#3b82f6);outline-offset:4px;background:rgba(127,127,127,.06)}\n"
+        ".chapter-list.reordering .chapter-row{cursor:grab}\n"
+        ".chapter-list.reordering .chapter-row.dragging{opacity:.9;cursor:grabbing;box-shadow:0 10px 28px rgba(0,0,0,.4);z-index:50}\n"
+    )
     open(css_path, "w", encoding="utf-8", newline="").write(css)
 
     # HC: 静态资源 cache-busting（v1.3.37）
