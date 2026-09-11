@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.48"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.53"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -1387,6 +1387,7 @@ def patch_ui(src: str) -> str:
             'if(!mids.length)continue;'
             'for(var k=0;k<cs.length;k++)cs[k].index=k+1;'
             'var vb={id:vid,virt:"custom",memberIds:mids,title:c.name||"\\u81EA\\u5B9A\\u4E49\\u5408\\u96C6",author:"\\u5408\\u96C6",coverUrl:cover,coverRatio:"",description:"\\u81EA\\u5B9A\\u4E49\\u5408\\u96C6\\uFF0C\\u5171 "+mids.length+" \\u672C\\uFF1A"+names.join("\\u3001"),category:"\\u81EA\\u5B9A\\u4E49\\u5408\\u96C6",tags:[],updatedAt:upd||Date.now(),chapterCount:cs.length,totalSize:size,folderRelPath:"",isMisc:!0};'
+            'if(c.desc!=null)vb.description=String(c.desc);if(c.author!=null)vb.author=String(c.author);if(c.category!=null)vb.category=String(c.category);if(c.tags!=null)vb.tags=c.tags;'
             'built[vid]=vb;t.chaptersByBookId[vid]=cs;t.books.push(vb);'
             'for(var h=0;h<mids.length;h++)for(var z2=0;z2<t.books.length;z2++){var bb=t.books[z2];'
             'if(bb.id===mids[h]&&bb!==vb){bb.mergedInto=vid;bb.hidden=!0;break}}}'
@@ -1406,6 +1407,7 @@ def patch_ui(src: str) -> str:
             'if(!pmids.length)continue;'
             'for(var k3=0;k3<pcs.length;k3++)pcs[k3].index=k3+1;'
             'var pv={id:pvid,virt:"pack",memberIds:pmids,title:p.name||"\\u8FDE\\u64AD\\u6E05\\u5355",author:"\\u8FDE\\u64AD",coverUrl:pcover,coverRatio:"",description:"\\u8FDE\\u64AD\\u6E05\\u5355\\uFF0C\\u6309\\u987A\\u5E8F\\u5305\\u542B "+pmids.length+" \\u672C\\uFF1A"+pnames.join("\\u3001"),category:"\\u5408\\u96C6\\u5305",tags:[],updatedAt:pupd||Date.now(),chapterCount:pcs.length,totalSize:psize,folderRelPath:"",isMisc:!0};'
+            'if(p.desc!=null)pv.description=String(p.desc);if(p.author!=null)pv.author=String(p.author);if(p.category!=null)pv.category=String(p.category);if(p.tags!=null)pv.tags=p.tags;'
             't.chaptersByBookId[pvid]=pcs;t.books.push(pv)}'
             '}\n'
             'var K="audiobook_settings_v1"')
@@ -1513,6 +1515,39 @@ def patch_ui(src: str) -> str:
             'removed:sel.length?sel.length:n0,remaining:bk2?(bk2.memberIds||[]).length:0,gone:!bk2}})}),')
         assert src.count(g4g_old) == 1, "G4g 锚点数量异常"
         src = src.replace(g4g_old, g4g_new)
+        # G4SPLIT: 拆分合集路由 —— 与打散合集的区别：选中的成员不恢复为独立有声书，
+        #   而是归入一个【新的自定义合集】(virt="custom"，成员隐藏)。shorts 拆分时同时
+        #   把成员加入 ignoredShortsMembers，避免下次扫描又被自动合并回去。
+        g4split_old = 'removed:sel.length?sel.length:n0,remaining:bk2?(bk2.memberIds||[]).length:0,gone:!bk2}})}),'
+        g4split_new = (g4split_old +
+            's.post("/api/books/:id/split",async(o,e)=>{var bk=null;'
+            'for(var z=0;z<t.books.length;z++)if(t.books[z].id===e.id){bk=t.books[z];break}'
+            'if(!bk||!bk.virt)return h("' + _u("仅合集可拆分") + '",400);'
+            'var body={};try{body=typeof o.body=="string"?JSON.parse(o.body):o.body||{}}catch(_){}'
+            'var name=String(body.name||"").trim();'
+            'if(!name)return h("' + _u("请填写新合集名称") + '",400);'
+            'var sel=(body.ids||[]).map(String),n0=(bk.memberIds||[]).length;'
+            'var nid=Date.now().toString(36)+Math.random().toString(36).slice(2,6);'
+            't.settings.customCollections||(t.settings.customCollections=[]);'
+            't.settings.customCollections.push({id:nid,name:name,memberIds:sel.length?sel:(bk.memberIds||[])});'
+            'if(bk.virt==="shorts"){'
+            'var ig=t.settings.ignoredShortsMembers||(t.settings.ignoredShortsMembers=[]);'
+            'var mm=sel.length?sel:(bk.memberIds||[]);'
+            'for(var q2=0;q2<mm.length;q2++)if(ig.indexOf(mm[q2])<0)ig.push(mm[q2]);'
+            'await t.saveSettings();__SHORTS_MERGE(t),__CUSTOM_MERGE(t,t.settings)}'
+            'else{'
+            'var cid2=String(e.id).replace(/^__(?:custom|pack)_/,""),cl2=t.settings.customCollections,cf=null;'
+            'if(sel.length){for(var z3=0;z3<cl2.length;z3++)if(cl2[z3].id===cid2){cf=cl2[z3];break}}'
+            'if(cf){cf.memberIds=(cf.memberIds||[]).filter(function(x){return sel.indexOf(x)<0});'
+            'if(!cf.memberIds.length)t.settings.customCollections=t.settings.customCollections.filter(function(c){return c.id!==cid2})}'
+            'else if(!sel.length){t.settings.customCollections=t.settings.customCollections.filter(function(c){return c.id!==cid2})}'
+            'await t.saveSettings();__SHORTS_MERGE(t),__CUSTOM_MERGE(t,t.settings)}'
+            'try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
+            'var bk2=null;for(var z4=0;z4<t.books.length;z4++)if(t.books[z4].id===e.id){bk2=t.books[z4];break}'
+            'return f({success:!0,data:{id:e.id,newColId:nid,split:!0,virt:bk.virt,partial:sel.length>0,'
+            'removed:sel.length?sel.length:n0,remaining:bk2?(bk2.memberIds||[]).length:0,gone:!bk2}})}),')
+        assert src.count(g4split_old) == 1, "G4SPLIT 锚点数量异常"
+        src = src.replace(g4split_old, g4split_new)
 
         # G4h: list() 支持 libFilter（shorts/custom/pack/fav）
         g4h_old = ',t.favoritesOnly){let c=new Set(this.settings.favorites);a=a.filter(u=>c.has(u.id))}'
@@ -1529,6 +1564,80 @@ def patch_ui(src: str) -> str:
         g4i_new = 'sortBy:e.sortBy||"updatedAt",order:e.order||"",libFilter:e.libFilter||""'
         assert src.count(g4i_old) == 1, "G4i 锚点数量异常"
         src = src.replace(g4i_old, g4i_new)
+        # P-META: 编辑保存修复（v1.3.52）
+        #   1) 合集(custom/pack)编辑：不再写 metadata.json（虚拟书 folderRelPath 为空，
+        #      会报 fs.writeFile: path not in allowed directories），改为把简介/作者/分类/标签
+        #      存到合集定义覆盖字段(desc/author/category/tags)，__CUSTOM_MERGE 物化时应用。
+        #   2) 普通书编辑：同步写入 settings.bookEdits 覆盖层并 saveSettings——
+        #      批量编辑(bookEdits)在 list()/getBookById() 里永远优先于 metadata.json，
+        #      之前单本编辑只写 metadata.json+内存 → 有批量编辑历史的书"保存不生效"，
+        #      且内存值不持久化，宿主重载后还原。
+        pmeta_old = '=r;try{await t.updateMetadata(e.id,{description:a,category:i,tags:g,author:l,coverRatio:c});'
+        assert src.count(pmeta_old) == 1, "P-META 锚点数量异常"
+        pmeta_new = ('=r;try{var bkM=null;for(var zM=0;zM<t.books.length;zM++)if(t.books[zM].id===e.id){bkM=t.books[zM];break}'
+            'if(bkM&&(bkM.virt==="custom"||bkM.virt==="pack")){'
+            'var cidM=String(e.id).replace(/^__(?:custom|pack)_/,""),'
+            'lstM=bkM.virt==="custom"?(t.settings.customCollections||(t.settings.customCollections=[])):(t.settings.collectionPacks||(t.settings.collectionPacks=[])),defM=null;'
+            'for(var qM=0;qM<lstM.length;qM++)if(lstM[qM].id===cidM){defM=lstM[qM];break}'
+            'if(!defM)return h("' + _u("合集定义不存在") + '",404);'
+            'if(a!=null)defM.desc=String(a);if(l!=null)defM.author=String(l);if(i!=null)defM.category=String(i);if(g!=null)defM.tags=Array.isArray(g)?g.map(String):[];'
+            'await t.saveSettings();__CUSTOM_MERGE(t,t.settings);'
+            'try{await N({books:t.books,chaptersByBookId:t.chaptersByBookId})}catch(_){}'
+            'let uM=t.getBookById(e.id);return f({success:!0,data:{description:uM.description,category:uM.category,tags:uM.tags,author:uM.author,coverRatio:uM.coverRatio||"",coverUrl:await v(uM.coverUrl)}})}'
+            'await t.updateMetadata(e.id,{description:a,category:i,tags:g,author:l,coverRatio:c});'
+            't.settings.bookEdits||(t.settings.bookEdits={});'
+            'var edM=t.settings.bookEdits[e.id]||(t.settings.bookEdits[e.id]={});'
+            'if(a!=null)edM.description=String(a);if(i!=null)edM.category=String(i);if(g!=null)edM.tags=Array.isArray(g)?g.map(String):[];if(l!=null)edM.author=String(l);'
+            'var anyM=!1;for(var kM in edM)anyM=!0;if(!anyM)delete t.settings.bookEdits[e.id];'
+            'await t.saveSettings();')
+        src = src.replace(pmeta_old, pmeta_new)
+
+        # P-ADV: 高级选项——列出/分别重置可能影响扫描结果的缓存
+        #   abscan(增量扫描分片缓存) / transcode(WMA转码缓存) / dltemp(.cache/dl_*.tmp)
+        #   scanignore(忽略目录列表: 内置6项+.scanignore, 进程内只增不减→重建) / shortsIgnored(合集忽略名单)
+        # 1) 目录文件统计 helper（挂在 V() 之后，语句上下文）
+        adv_helper_old = 'return{deletedCount:s}}'
+        assert src.count(adv_helper_old) == 1, "P-ADV helper 锚点数量异常"
+        adv_helper_new = ('return{deletedCount:s}}'
+            'async function __advDirFiles(dir,prefix,suffix){let out=[],tot=0;'
+            'try{let es=await songloft.fs.readdir(dir)||[];'
+            'for(let e0 of es){if(e0.isDir)continue;let nm=String(e0.name||"");'
+            'if(prefix&&nm.indexOf(prefix)!==0)continue;'
+            'if(suffix&&nm.lastIndexOf(suffix)!==nm.length-suffix.length)continue;'
+            'let p=dir+"/"+nm,sz=0;try{let st=await songloft.fs.stat(p);sz=Number(st&&st.size||0)}catch(_){sz=0}'
+            'out.push(nm);tot+=sz}}catch(_){}'
+            'return{count:out.length,size:tot,names:out}}')
+        src = src.replace(adv_helper_old, adv_helper_new)
+
+        # 2) 路由：GET 统计 + POST 分别重置（挂在 /api/cache/info 之后，表达式链内只插表达式）
+        adv_routes_old = 's.get("/api/cache/info",async()=>{let o=await Q();return f({success:!0,data:o})}),'
+        assert src.count(adv_routes_old) == 1, "P-ADV routes 锚点数量异常"
+        adv_routes_new = (adv_routes_old +
+            's.get("/api/advanced-cache",async()=>{'
+            'let ab=await __advDirFiles(".cache/abscan","",""),tr=await __advDirFiles(".cache/transcode","",""),dl=await __advDirFiles(".cache","dl_",".tmp");'
+            'let igLines=0;try{let ig0=await songloft.fs.readFile(M+"/.scanignore");if(ig0)for(let l0 of ig0.split(/\\r?\\n/)){l0=l0.trim();if(l0&&l0.charAt(0)!=="#")igLines++}}catch(_){}'
+            'return f({success:!0,data:{abscan:{count:ab.count,size:ab.size},transcode:{count:tr.count,size:tr.size},dltemp:{count:dl.count,size:dl.size},scanignore:{lines:igLines,active:__IGN.size},shortsIgnored:{count:((t.settings||{}).ignoredShortsMembers||[]).length},scanning:!!(__SCANP&&__SCANP.scanning)}})}),'
+            's.post("/api/advanced-cache/clear",async o=>{'
+            'let d=typeof o.body=="string"?JSON.parse(o.body):o.body||{};let ty=String(d.type||"");'
+            'if(__SCANP&&__SCANP.scanning)return h("' + _u("正在扫描中，请等扫描完成后再重置") + '",409);'
+            'if(ty==="abscan"||ty==="transcode"||ty==="dltemp"){'
+            'let dir=ty==="abscan"?".cache/abscan":(ty==="transcode"?".cache/transcode":".cache");'
+            'let pre=ty==="dltemp"?"dl_":"",suf=ty==="dltemp"?".tmp":"";'
+            'let lst=await __advDirFiles(dir,pre,suf);let rm=0,fl=0;'
+            'for(let i5=0;i5<lst.names.length;i5++){try{await songloft.fs.unlink(dir+"/"+lst.names[i5]);rm++}catch(_){fl++}}'
+            'songloft.log.info("' + _u("高级选项：已重置") + ' "+ty+" '+_u("，删除")+' "+rm+" '+_u("个文件")+'");'
+            'return f({success:!0,data:{type:ty,removed:rm,failed:fl}})}'
+            'if(ty==="scanignore"){'
+            '__IGN=new Set(["_ARCHIVE_TRASH","_DEDUPE_TRASH","@eaDir","@SynologyResource","#recycle","@sharebin"]);'
+            'try{let ig1=await songloft.fs.readFile(M+"/.scanignore");if(ig1)for(let l1 of ig1.split(/\\r?\\n/)){l1=l1.trim();if(l1&&l1.charAt(0)!=="#")__IGN.add(l1)}}catch(_){}'
+            'songloft.log.info("' + _u("高级选项：忽略目录列表已重建，共") + ' "+__IGN.size+" ' + _u("项") + '");'
+            'return f({success:!0,data:{type:ty,active:__IGN.size}})}'
+            'if(ty==="shortsIgnored"){'
+            't.settings.ignoredShortsMembers=[];await t.saveSettings();'
+            't.__remerge().then(function(c9){songloft.log.info("' + _u("清空合集忽略名单后重建合集：") + ' "+c9+" ' + _u("个") + '")}).catch(function(_){});'
+            'return f({success:!0,data:{type:ty,count:0}})}'
+            'return h("' + _u("未知缓存类型") + ': "+ty,400)}),')
+        src = src.replace(adv_routes_old, adv_routes_new)
 
     return src
 
@@ -1993,6 +2102,33 @@ def patch_static(build_dir: str) -> None:
                 '    </div>\n'
                 + hg4j_old)
     html = rep(html, hg4j_old, hg4j_new, "HG4j")
+    # HG_SPLIT: 拆分合集弹窗（复用打散弹窗 .sc-* 样式，多一个新合集名称输入框）
+    hg_split_old = '    <!-- 删除确认弹窗 -->\n'
+    hg_split_new = ('    <!-- 拆分合集弹窗 -->\n'
+                '    <div id="spOverlay" class="edit-overlay" hidden>\n'
+                '      <div class="edit-modal">\n'
+                '        <h3 id="spTitle">拆分合集</h3>\n'
+                '        <div class="col-hint" id="spHint"></div>\n'
+                '        <div class="edit-field">\n'
+                '          <label for="spName">新合集名称</label>\n'
+                '          <input type="text" id="spName" placeholder="如：第一部" />\n'
+                '        </div>\n'
+                '        <div class="edit-field">\n'
+                '          <div class="sc-head">\n'
+                '            <label class="sc-head-title" style="margin:0">要拆出的成员</label>\n'
+                '            <button class="btn btn-ghost" id="spToggleAll" type="button">全不选</button>\n'
+                '          </div>\n'
+                '          <div class="sc-tip">不勾选直接确认 = 把整个合集拆为新合集</div>\n'
+                '          <div id="spList" class="sc-list"></div>\n'
+                '        </div>\n'
+                '        <div class="edit-actions">\n'
+                '          <button class="btn btn-ghost" id="spCancel" type="button">取消</button>\n'
+                '          <button class="btn btn-primary" id="spConfirm" type="button">拆分为新合集</button>\n'
+                '        </div>\n'
+                '      </div>\n'
+                '    </div>\n'
+                + hg_split_old)
+    html = rep(html, hg_split_old, hg_split_new, "HG_SPLIT")
 
     # HG4b: 主页筛选下拉（全部/收藏/自动合集/自定义合集/合集包）
     #       v1.3.35：同时删除「只看收藏」复选框——筛选下拉已含「收藏」选项，二者重复
@@ -2014,6 +2150,27 @@ def patch_static(build_dir: str) -> None:
 
     # H_REORDER: 已移除（v1.3.43）——「调序/自定义顺序」改为做在书籍详情的「章节列表」上，
     #   不在首页书本列表加按钮。相关补丁见 J_CHAPTER_*。
+
+    # H_ADV (v1.3.50): 设置面板加「高级选项」区（默认折叠），分别重置各类缓存
+    h_adv_old = ('<button class="btn btn-ghost settings-clean-btn" id="btnCleanCache">🗑️ 清理缓存</button>\n'
+                 '          </div>')
+    h_adv_new = ('<button class="btn btn-ghost settings-clean-btn" id="btnCleanCache">🗑️ 清理缓存</button>\n'
+                 '          </div>\n'
+                 '          <div class="settings-section">\n'
+                 '            <div class="settings-section-title">高级选项</div>\n'
+                 '            <button class="btn btn-ghost" id="btnAdvToggle" title="展开后可分别重置各类可能影响扫描结果的缓存">▶ 展开高级选项</button>\n'
+                 '            <div id="advCacheBody" style="display:none;margin-top:8px">\n'
+                 '              <div class="settings-pref-desc">以下缓存可能影响扫描/播放结果，可分别重置；重置不会删除书籍、章节与播放进度。增量扫描缓存重置后，下次扫描将自动变为全量。</div>\n'
+                 '              <div class="adv-row"><span class="adv-label">增量扫描缓存<span class="adv-stat" id="advStatAbcan"></span></span><button class="btn btn-ghost adv-btn" id="btnAdvAbcan">重置</button></div>\n'
+                 '              <div class="adv-row"><span class="adv-label">忽略目录列表<span class="adv-stat" id="advStatIg"></span></span><button class="btn btn-ghost adv-btn" id="btnAdvScanIg">重建</button></div>\n'
+                 '              <div class="adv-row"><span class="adv-label">转码缓存<span class="adv-stat" id="advStatTr"></span></span><button class="btn btn-ghost adv-btn" id="btnAdvTr">清理</button></div>\n'
+                 '              <div class="adv-row"><span class="adv-label">下载临时文件<span class="adv-stat" id="advStatDl"></span></span><button class="btn btn-ghost adv-btn" id="btnAdvDl">清理</button></div>\n'
+                 '              <div class="adv-row"><span class="adv-label">合集忽略名单<span class="adv-stat" id="advStatSi"></span></span><button class="btn btn-ghost adv-btn" id="btnAdvSi">清空</button></div>\n'
+                 '            </div>\n'
+                 '          </div>')
+    n_hadv = html.count(h_adv_old)
+    assert n_hadv == 1, "H_ADV 锚点数量异常: %d" % n_hadv
+    html = html.replace(h_adv_old, h_adv_new)
 
     open(html_path, "w", encoding="utf-8", newline="").write(html)
     print("  index.html: +显示方式/顺序下拉 +别名字段 +路径复制 +设置默认显示方式")
@@ -2601,6 +2758,56 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                'scO&&(scO.onclick=ev=>{ev.target===ev.currentTarget&&(ev.currentTarget.hidden=!0)});'
                + j46_old)
     js = rep(js, j46_old, j46_new, "J46")
+    # J_SPLIT: 绑定详情页「拆分合集」按钮 + 拆分弹窗逻辑（与打散对称；
+    #   区别：确认时调 /api/books/:id/split 并携带新合集名称，把选中成员归入新自定义合集）
+    j_split_old = 'scO&&(scO.onclick=ev=>{ev.target===ev.currentTarget&&(ev.currentTarget.hidden=!0)});'
+    j_split_new = (j_split_old +
+               'var spB=document.getElementById("btnSplitCol");'
+               'spB&&(spB.onclick=async()=>{'
+               'window.__spBook=e;'
+               'var lb=document.getElementById("spList"),oh=document.getElementById("spHint"),'
+               'ol=document.getElementById("spOverlay"),nm=document.getElementById("spName");'
+               'if(!lb||!ol)return;lb.innerHTML="";'
+               'oh.textContent=e.virt==="shorts"?'
+               + _qs("勾选要拆出的书；拆出后归入新的自定义合集（成员隐藏），不再随原自动合集合并。不勾选直接确认 = 把整个合集拆为新合集。")
+               + ':'
+               + _qs("勾选要拆出的书；拆出后归入新的自定义合集（成员隐藏）。不勾选直接确认 = 把整个合集拆为新合集。") + ';'
+               'if(nm)nm.value=String(e.title||"")+" - \\u62C6\\u5206";'
+               'try{var r=await y("/api/books/"+encodeURIComponent(e.id)+"/members");'
+               '(r.members||[]).forEach(function(m){'
+               'var it=document.createElement("label");it.className="sc-item";'
+               'var cb=document.createElement("input");cb.type="checkbox";cb.value=m.id;cb.checked=!0;'
+               'var sp=document.createElement("span");sp.textContent=m.title;'
+               'it.appendChild(cb);it.appendChild(sp);lb.appendChild(it)});'
+               'var ta=document.getElementById("spToggleAll");ta&&(ta.textContent="\\u5168\\u4E0D\\u9009");'
+               'ol.hidden=!1}catch(err){u("' + _u("加载成员失败：") + '"+err.message)}});'
+               'var spC=document.getElementById("spConfirm");'
+               'spC&&(spC.onclick=async()=>{'
+               'var b=window.__spBook;if(!b)return;'
+               'var nm2=document.getElementById("spName");'
+               'var name=nm2?nm2.value.trim():"";'
+               'if(!name){u("\\u8bf7\\u586b\\u5199\\u65b0\\u5408\\u96c6\\u540d\\u79f0");return}'
+               'var ids=[];document.querySelectorAll("#spList input[type=checkbox]")'
+               '.forEach(function(x){x.checked&&ids.push(x.value)});'
+               'try{var r=await y("/api/books/"+encodeURIComponent(b.id)+"/split",'
+               '{method:"POST",body:JSON.stringify({ids:ids,name:name}),headers:{"Content-Type":"application/json"}});'
+               'var o5=document.getElementById("spOverlay");o5&&(o5.hidden=!0);'
+               'u(r.gone?'
+               + _qs("已拆分「") + '+String(b.title||"")+' + _qs("」：全部 ") + '+r.removed+' + _qs(" 本归入新合集「") + '+name+' + _qs("」")
+               + ':'
+               + _qs("已拆出 ") + '+r.removed+' + _qs(" 本到新合集「") + '+name+' + _qs("」，「") + '+String(b.title||"")+' + _qs("」还剩 ") + '+r.remaining+' + _qs(" 本") + ');'
+               'k("homeView");try{await w()}catch(_){}}catch(err){u("' + _u("拆分失败：") + '"+err.message)}});'
+               'var spX=document.getElementById("spCancel");'
+               'spX&&(spX.onclick=()=>{var o6=document.getElementById("spOverlay");o6&&(o6.hidden=!0)});'
+               'var spT=document.getElementById("spToggleAll");'
+               'spT&&(spT.onclick=()=>{var bs=document.querySelectorAll("#spList input[type=checkbox]");'
+               'var all=bs.length&&Array.prototype.every.call(bs,function(x){return x.checked});'
+               'Array.prototype.forEach.call(bs,function(x){x.checked=!all});'
+               'spT.textContent=all?"\\u5168\\u9009":"\\u5168\\u4E0D\\u9009"});'
+               'var spO=document.getElementById("spOverlay");'
+               'spO&&(spO.onclick=ev=>{ev.target===ev.currentTarget&&(ev.currentTarget.hidden=!0)});')
+    assert js.count(j_split_old) == 1, "J_SPLIT 锚点数量异常"
+    js = js.replace(j_split_old, j_split_new)
 
     # JG4h: 详情页按钮 —— 「重新扫描」对纯虚拟合集隐藏（无对应目录，misc 未分类目录书保留）。
     #       v1.3.40 恢复「打散合集」按钮，但**仅 shorts(自动合集)/custom(自定义合集)** 显示；
@@ -2613,7 +2820,8 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
                 'title="${e.virt==="shorts"?' + _qs("打散自动合集：这些书不再被自动合并（不删除文件）")
                 + ':e.virt==="pack"?' + _qs("移除连播清单：原书不受影响（不删除文件）")
                 + ':' + _qs("打散合集：成员书恢复显示（不删除文件）") + '}"'
-                '${(e.virt==="shorts"||e.virt==="custom")?"":" hidden"}>\\u6253\\u6563\\u5408\\u96C6</button>')
+                '${(e.virt==="shorts"||e.virt==="custom")?"":" hidden"}>\\u6253\\u6563\\u5408\\u96C6</button>\\n'
+'          <button class="btn btn-ghost" id="btnSplitCol" title="${e.virt==="shorts"?' + _qs("拆分自动合集：选中的书归入新合集，不再随原合集合并（不删除文件）") + ':' + _qs("拆分合集：选中的书归入新合集（不删除文件）") + '}"${(e.virt==="shorts"||e.virt==="custom")?"":" hidden"}>\\u62C6\\u5206\\u5408\\u96C6</button>')
     js = rep(js, jg4h_old, jg4h_new, "JG4h")
 
     # J32a: 详情页暂停/倍速按钮的状态同步函数（追加到 cycleSpeed 之后，IIFE 顶层可用）
@@ -2931,6 +3139,61 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         'document.getElementById("chapterReorderBtn").addEventListener("click",()=>__toggleChapterReorder(e)),'
         'document.getElementById("chapterUpdateTableBtn").addEventListener("click",()=>__updateChapterTable(e))')
     js = rep(js, j_chapter_bind_old, j_chapter_bind_new, "J_CHAPTER_BIND")
+    # J_CHAPTER_SEARCH_*: v1.3.53 章节列表搜索框（按章节名称筛选，视图层过滤，
+    #   不影响播放顺序/调序/更新章节表——隐藏行仍在 DOM，__domChapterIds 全量收集）。
+    #   序号保持章节表原始位置号；标题计数显示「匹配 m/N」；按书记忆关键词(__chapterFilterByBook)。
+    j_csh_old = 'return ch.slice().sort(function(a,b){return asc?a.index-b.index:b.index-a.index})}'
+    assert js.count(j_csh_old) == 1, "J_CHAPTER_SEARCH_H 锚点数量异常"
+    j_csh_new = (j_csh_old +
+        'function __chapterApplyFilter(e){var body=document.querySelector(".chapter-list-body");if(!body)return;'
+        'var ip=document.getElementById("chapterSearchInput");var kw=String(ip&&ip.value||"").trim().toLowerCase();'
+        'window.__chapterFilterByBook=window.__chapterFilterByBook||{};window.__chapterFilterByBook[e.id]=kw;'
+        'var rows=body.querySelectorAll(".chapter-row"),m=0;'
+        'for(var i=0;i<rows.length;i++){var ti=rows[i].querySelector(".chapter-title");'
+        'var ok=!kw||(ti&&String(ti.textContent||"").toLowerCase().indexOf(kw)>=0);'
+        'rows[i].style.display=ok?"":"none";if(ok)m++}'
+        'var lb=document.getElementById("chapterCountLabel");'
+        'if(lb)lb.textContent=kw?"章节列表（匹配 "+m+"/"+rows.length+"）":"章节列表（"+rows.length+"）"}'
+        'function __bindChapterSearch(e){var ip=document.getElementById("chapterSearchInput");if(!ip||ip.dataset.boundCS)return;'
+        'ip.dataset.boundCS="1";ip.value=String((window.__chapterFilterByBook||{})[e.id]||"");'
+        'ip.addEventListener("input",function(){__chapterApplyFilter(e)});'
+        'var bt=document.getElementById("chapterSearchBtn");bt&&(bt.onclick=function(){ip.focus()})}'
+        'function __bindDescMore(e){var dm=document.getElementById("descMoreBtn");if(!dm)return;dm.onclick=function(){window.__descExpanded=window.__descExpanded||{};window.__descExpanded[e.id]=!window.__descExpanded[e.id];K(e)}}')
+    js = js.replace(j_csh_old, j_csh_new)
+
+    j_cs_head_old = '\\u7AE0\\u8282\\u5217\\u8868\\uFF08${e.chapters.length}\\uFF09\n        <span class="chapter-list-actions">'
+    assert js.count(j_cs_head_old) == 1, "J_CHAPTER_SEARCH_HEAD 锚点数量异常"
+    j_cs_head_new = ('<span id="chapterCountLabel">\\u7AE0\\u8282\\u5217\\u8868\\uFF08${e.chapters.length}\\uFF09</span>\n'
+        '        <div class="search-box chapter-search" role="search">\n'
+        '          <input id="chapterSearchInput" type="text" placeholder="搜索章节名称..." autocomplete="off" />\n'
+        '          <button id="chapterSearchBtn" aria-label="搜索">🔍</button>\n'
+        '        </div>\n'
+        '        <span class="chapter-list-actions">')
+    js = js.replace(j_cs_head_old, j_cs_head_new)
+
+    j_cs_render_old = ';a=__arr}t.innerHTML=`'
+    assert js.count(j_cs_render_old) == 1, "J_CHAPTER_SEARCH_RENDER 锚点数量异常"
+    j_cs_render_new = (';a=__arr}var __rank={},__shown=a;'
+        'var __kw=String((window.__chapterFilterByBook||{})[e.id]||"").trim().toLowerCase();'
+        'if(__kw)__shown=a.filter(function(c){return String(c.title||"").toLowerCase().indexOf(__kw)>=0});'
+        'a.forEach(function(c,__pi){__rank[c.id]=__pi+1});var __dfull=String(e.description||"");var __dexp=!!((window.__descExpanded||{})[e.id]);var __dtext=(__dfull.length>50&&!__dexp)?__dfull.slice(0,50)+"…":__dfull;t.innerHTML=`')
+    js = js.replace(j_cs_render_old, j_cs_render_new)
+
+    j_cs_map_old = '${a.map((i,__pos)=>`'
+    assert js.count(j_cs_map_old) == 1, "J_CHAPTER_SEARCH_MAP 锚点数量异常"
+    j_cs_map_new = '${__shown.map((i,__pos)=>`'
+    js = js.replace(j_cs_map_old, j_cs_map_new)
+
+    j_cs_idx_old = '<div class="chapter-index">${String(__pos+1).padStart(3,"0")}</div>'
+    assert js.count(j_cs_idx_old) == 1, "J_CHAPTER_SEARCH_IDX 锚点数量异常"
+    j_cs_idx_new = '<div class="chapter-index">${String(__rank[i.id]).padStart(3,"0")}</div>'
+    js = js.replace(j_cs_idx_old, j_cs_idx_new)
+
+    j_cs_bind_old = ',document.getElementById("chapterUpdateTableBtn").addEventListener("click",()=>__updateChapterTable(e))'
+    assert js.count(j_cs_bind_old) == 1, "J_CHAPTER_SEARCH_BIND 锚点数量异常"
+    j_cs_bind_new = j_cs_bind_old + ',__bindChapterSearch(e),__bindDescMore(e)'
+    js = js.replace(j_cs_bind_old, j_cs_bind_new)
+    js = rep(js, '<div class="book-hero-desc">${f(e.description||"")}</div>', '<div class="book-hero-desc">${f(__dtext)}${__dfull.length>50?(__dexp?\'<a class="desc-more" id="descMoreBtn">收起</a>\':\'<a class="desc-more" id="descMoreBtn">查看更多</a>\'):""}</div>', "DESC-TPL")
 
     # J_CHAPTER_PLAYORDER: 让播放顺序（上一章/下一章/自动连播/播放列表）也遵循自定义顺序
     #   __effChapters(book, asc) 在「自定义顺序」激活时返回按保存顺序排好的章节数组，
@@ -2986,6 +3249,30 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
     j_reorder_fe_new = '__vm!=="large"&&e.classList.add("mode-"+__vm);if(!n.books.length){e.innerHTML="";return}let __list=n.books;if(window.__customActive&&window.__customOrder&&window.__customOrder.length){let __rk=window.__customOrder;__list=n.books.slice().sort(function(a,b){let ra=__rk.indexOf(a.id);if(ra<0)ra=1e12;let rb=__rk.indexOf(b.id);if(rb<0)rb=1e12;return ra-rb})}e.innerHTML=__list.map(t=>'
     # (removed v1.3.43) J_REORDER_FE 不再需要：首页列表自定义顺序已移除
     # js = rep(js, j_reorder_fe_old, j_reorder_fe_new, "J_REORDER_FE")
+
+    # J_ADV (v1.3.50): 设置面板「高级选项」——缓存统计刷新 + 折叠开关 + 各类缓存分别重置
+    j_adv_helpers_old = 'async function ve(){'
+    j_adv_helpers_new = (
+        'function __fmtSz(n0){n0=Number(n0)||0;return n0>=1048576?(n0/1048576).toFixed(1)+" MB":n0>=1024?(n0/1024).toFixed(1)+" KB":n0+" B"}\n'
+        'async function __advRefresh(){try{let d=await y("/api/advanced-cache");if(!d)return;var S=function(id,txt){var el=document.getElementById(id);el&&(el.textContent=txt)};'
+        'S("advStatAbcan",(d.abscan.count||0)+" \\u4e2a / "+__fmtSz(d.abscan.size));'
+        'S("advStatTr",(d.transcode.count||0)+" \\u4e2a / "+__fmtSz(d.transcode.size));'
+        'S("advStatDl",(d.dltemp.count||0)+" \\u4e2a / "+__fmtSz(d.dltemp.size));'
+        'S("advStatIg",".scanignore "+(d.scanignore.lines||0)+" \\u6761\\uff0c\\u751f\\u6548 "+(d.scanignore.active||0)+" \\u9879");'
+        'S("advStatSi",(d.shortsIgnored.count||0)+" \\u672c")}catch(e){}}\n'
+        'function __bindAdvCache(){'
+        'var tg=document.getElementById("btnAdvToggle");if(tg&&!tg.__advB){tg.__advB=1;tg.addEventListener("click",function(){var bd=document.getElementById("advCacheBody");if(!bd)return;var show=bd.style.display==="none";bd.style.display=show?"block":"none";tg.textContent=show?"\\u25bc \\u6536\\u8d77\\u9ad8\\u7ea7\\u9009\\u9879":"\\u25b6 \\u5c55\\u5f00\\u9ad8\\u7ea7\\u9009\\u9879";if(show)__advRefresh()})}'
+        'var __map={btnAdvAbcan:"abscan",btnAdvScanIg:"scanignore",btnAdvTr:"transcode",btnAdvDl:"dltemp",btnAdvSi:"shortsIgnored"};'
+        'var __names={abscan:"\\u589e\\u91cf\\u626b\\u63cf\\u7f13\\u5b58",scanignore:"\\u5ffd\\u7565\\u76ee\\u5f55\\u5217\\u8868\\uff08\\u91cd\\u5efa\\u4e3a\\u5185\\u7f6e+.scanignore \\u5f53\\u524d\\u5185\\u5bb9\\uff09",transcode:"\\u8f6c\\u7801\\u7f13\\u5b58",dltemp:"\\u4e0b\\u8f7d\\u4e34\\u65f6\\u6587\\u4ef6",shortsIgnored:"\\u5408\\u96c6\\u5ffd\\u7565\\u540d\\u5355\\uff08\\u6e05\\u7a7a\\u540e\\u81ea\\u52a8\\u91cd\\u5efa\\u5408\\u96c6\\uff09"};'
+        'for(var __k in __map){(function(id,ty){var b=document.getElementById(id);if(!b||b.__advB)return;b.__advB=1;'
+        'b.addEventListener("click",function(){__confirmBox("\\u91cd\\u7f6e\\u786e\\u8ba4","\\u786e\\u5b9a\\u8981\\u91cd\\u7f6e\\u3010"+__names[ty]+"\\u3011\\u5417\\uff1f",async function(){'
+        'try{await y("/api/advanced-cache/clear",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({type:ty})});u("\\u5df2\\u91cd\\u7f6e\\uff1a"+__names[ty]);__advRefresh()}catch(e){u("\\u91cd\\u7f6e\\u5931\\u8d25\\uff1a"+e.message)}})})})(__k,__map[__k])}}\n'
+        'async function ve(){')
+    js = rep(js, j_adv_helpers_old, j_adv_helpers_new, "J_ADV_HELPERS")
+
+    j_adv_boot_old = 'document.getElementById("btnCleanCache").addEventListener("click",ve)}'
+    j_adv_boot_new = 'document.getElementById("btnCleanCache").addEventListener("click",ve);__bindAdvCache();}'
+    js = rep(js, j_adv_boot_old, j_adv_boot_new, "J_ADV_BOOT")
 
     open(js_path, "w", encoding="utf-8", newline="").write(js)
     # 前端语法自检：minified 单行 bundle 里的语法错误（如逗号表达式中插入 var 语句）
@@ -3184,10 +3471,24 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
         "/* ===== v1.3.46 章节自定义顺序 / 调序 / 更新章节表 ===== */\n"
         ".btn.active{background:var(--primary,#3b82f6);color:#fff;border-color:var(--primary,#3b82f6)}\n"
         ".chapter-list-actions{display:flex;align-items:center;gap:8px;margin-left:auto}\n"
-        "button[title]{cursor:help}\n"
         ".chapter-list.reordering{outline:2px dashed var(--primary,#3b82f6);outline-offset:4px;background:rgba(127,127,127,.06)}\n"
         ".chapter-list.reordering .chapter-row{cursor:grab}\n"
         ".chapter-list.reordering .chapter-row.dragging{opacity:.9;cursor:grabbing;box-shadow:0 10px 28px rgba(0,0,0,.4);z-index:50}\n"
+        "/* ===== v1.3.50 设置-高级选项（缓存重置）：WebF 下用 block+inline-block，避免 flex 压缩 ===== */\n"
+        "#btnAdvToggle{display:block;width:100%;text-align:left;margin-top:6px}\n"
+        "#advCacheBody .settings-pref-desc{margin-bottom:4px}\n"
+        ".adv-row{display:block;border-top:1px solid var(--border);padding:8px 0;overflow:hidden}\n"
+        ".adv-label{display:inline-block;vertical-align:middle;max-width:calc(100% - 96px);font-size:13px;color:var(--text);line-height:1.5}\n"
+        ".adv-stat{display:inline-block;margin-left:6px;color:var(--text-3);font-size:12px}\n"
+        ".adv-btn{display:inline-block;vertical-align:middle;margin-left:8px;min-width:56px}\n"
+    )
+    css = css + (
+        "\n\n"
+        "/* ===== v1.3.53 章节搜索框：复用首页 .search-box 样式，标题行内左对齐 ===== */\n"
+        ".chapter-search{max-width:420px;min-width:160px;margin-left:14px}\n"
+        ".chapter-search input{font-size:13px;padding:6px 0}\n"
+        ".chapter-search button{width:30px;height:30px}\n"
+        ".book-hero-desc .desc-more{color:var(--primary,#3b82f6);cursor:pointer;margin-left:8px;font-size:13px;white-space:nowrap}\n"
     )
     open(css_path, "w", encoding="utf-8", newline="").write(css)
 
