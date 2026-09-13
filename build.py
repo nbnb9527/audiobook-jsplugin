@@ -64,7 +64,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.61"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.65"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -1668,6 +1668,110 @@ s.get("/api/similar-execute-progress",async()=>{let j=t.__simJob;return f({succe
         sim_routes_new = (SIM_ROUTES + sim_routes_old)
         src = src.replace(sim_routes_old, sim_routes_new)
 
+        # ---- Webhook 口令搜索（移植自官方 1.1.3；标识符加 wh 前缀防压缩冲突；CJK 经 _u 转 \uXXXX）----
+        # 片段以逗号链结尾，注入后衔接 advanced-cache/clear 路由；whD 映射为框架 f/h 响应包装。
+        WH_ROUTES = "(function(){" + _u(r'''
+// ===== Webhook 口令搜索有声书 (ported from official 1.1.3, 标识符加 wh 前缀避免与压缩变量冲突) =====
+var whI=[],whUt=200;
+function whLog(n,t,r,o){let e={time:Date.now(),type:n,action:t,detail:r,result:o};if(whI.length>0){let s=whI[whI.length-1];if(s.type===e.type&&s.action===e.action&&s.detail===e.detail&&s.result===e.result)return}whI.push(e);if(whI.length>whUt)whI.shift()}
+function whD(x,code){return(x&&x.success)?f(x):h((x&&x.error)||"error",code||500)}
+function whB(n){let t={};if(!n)return t;let r=n.split("&");for(let o of r){let e=o.indexOf("=");e===-1?t[decodeURIComponent(o)]="":t[decodeURIComponent(o.substring(0,e))]=decodeURIComponent(o.substring(e+1))}return t}
+function whGen(){let t="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",r="";for(let o=0;o<32;o++)r+=t.charAt(Math.floor(Math.random()*t.length));return r}
+function WhEnabled(t){return!!t.settings.webhookEnabled}
+function WhToken(t){return t.settings.webhookToken||(t.settings.webhookToken=whGen(),t.settings.webhookToken)}
+function WhVerify(t,tok){let r=WhToken(t);return r&&tok===r}
+async function WhSet(t,s,r){t.settings.webhookEnabled=s;if(typeof r=="string"&&r.trim())t.settings.serverHost=r.trim();await t.saveSettings();return s}
+async function WhRegen(t){t.settings.webhookToken=whGen();await t.saveSettings();return t.settings.webhookToken}
+
+var whOtKw=["播放有声书","有声书"],whCt=/(?:第|[零一二三四五六七八九十百千万章段落节回])/,whAt={零:0,一:1,二:2,三:3,四:4,五:5,六:6,七:7,八:8,九:9,十:10,百:100,千:1e3,万:1e4},whNextKw=["下一集","下一章","下一段","下一节","下一回"],whPrevKw=["上一集","上一章","上一段","上一节","上一回"],whStopKw=["暂停播放","停止播放","暂停","停一下","pause","stop","停止","别播了","关掉","关机","关闭","休眠","休息"];
+var whT1=/第(\d+|[零一二三四五六七八九十百千万]+)[章段落节回]?/;
+function whCn(n){if(/^\d+$/.test(n))return parseInt(n,10);let t=0,r=0;for(let o of n){let e=whAt[o];if(e===void 0)break;e>=10?(r=t>0?(r||t)*e:e,t+=r,r=0):r=t>0?t*e+r:r+e}return t+r}
+function whLt(n){return (n.replace(/(?:^|\s*)第\s*(?:\d+|[零一二三四五六七八九十百千万]+)\s*[章段落节回集]?\s*/g," ").replace(/\s{2,}/g," ").trim())||n.trim()}
+function whFt(n){let t=whT1.exec(n);if(t)return whCn(t[1]);let r=whCt.exec(n);if(r){let o=r[0].replace(/^第|[零一二三四五六七八九十百千万章段落节回]$/,""),e=whCn(o);if(e>0&&e<1e4)return e}return null}
+function whHt(n,t){let r=n.toLowerCase(),o=null;for(let e of t)r.includes(e)&&(!o||e.length>o[1].length)&&(o=[e,e]);return o}
+function whBt(n){let t=n.trim();if(!t)return null;for(let u of whNextKw)if(t.includes(u))return{intent:"NEXT_EPISODE",bookTitle:"",chapterIndex:null,relativeOffset:1,rawQuery:t};for(let u of whPrevKw)if(t.includes(u))return{intent:"PREV_EPISODE",bookTitle:"",chapterIndex:null,relativeOffset:-1,rawQuery:t};for(let u of whStopKw)if(t.includes(u))return{intent:"STOP",bookTitle:"",chapterIndex:null,relativeOffset:null,rawQuery:t};let r=whHt(t,whOtKw);if(!r)return null;let o=r[0],e=t.indexOf(o)+o.length,s=t.slice(e).trim(),i=whFt(s),a=whLt(s);return!a&&i===null?null:{intent:i?"PLAY_EPISODE":"PLAY_BOOK",bookTitle:a,chapterIndex:i,relativeOffset:null,rawQuery:t}}
+
+var whJ={},whL={},whUnd={},whQ={};
+function whOt(n,t,r,o,e,s){whJ[t]={deviceId:t,bookId:r,chapterId:o,chapterIndex:e,bookTitle:s,updatedAt:Date.now()};whLog("webhook","session updated",`did=${t} book="${s}" ch#${e}`,null)}
+var whZt="/api/v1/jsplugin/miot";
+var whLastHost="";
+async function whNt(n,t){let hostUrl=songloft.plugin&&songloft.plugin.getHostUrl?await songloft.plugin.getHostUrl():"";if(!hostUrl&&t)try{hostUrl=t.getSettings().serverHost||""}catch(_){}if(!hostUrl)hostUrl=whLastHost||"";if(!hostUrl)throw new Error("无法确定主机地址：getHostUrl 不可用且未配置 serverHost");whLastHost=hostUrl;return hostUrl+whZt+n}
+function whWt(n,t){if(t&&typeof t=="string")return t.trim();if(!Array.isArray(n)||n.length===0)return null;for(let r of n){let o=r.question;if(o)return o.trim();let s=r.intention?.query;if(s)return s.trim();let i=r.message;if(i?.response?.answer){let a=i.response.answer;if(a.length>0){let u=a[0],c=u.question;if(c)return c.trim();let g=u.intention?.query;if(g)return g.trim()}}}return null}
+function whJt(){return"/api/webhook/said"}
+async function whGetTok(){try{return songloft.plugin&&songloft.plugin.getToken?await songloft.plugin.getToken():""}catch{return""}}
+async function whPush(n,t,r,o,e,s){try{let i=await whGetTok(),a=n.getSettings().serverHost||"";if(!a)return songloft.log.warn("[webhook] serverHost 未设置，语音口令推送音响将无法工作，请在音响插件中配置正确的局域网地址"),whLog("error","推送准备","serverHost 未设置","❌"),!1;let u=`/api/v1/jsplugin/audiobook/api/books/${encodeURIComponent(o.id)}/chapters/${encodeURIComponent(e.id)}/audio`,c=[];i&&c.push(`access_token=${encodeURIComponent(i)}`),s>0&&c.push(`seek=${s}`);let l=c.length>0?`${a}${u}?${c.join("&")}`:`${a}${u}`;songloft.log.info(`[webhook] pushChapterToMiot start book="${o.title}" ch="${e.title}" seek=${s} aid=${t} did=${r}`);let g=await D(e.fileRelPath);songloft.log.info(`[webhook] file ready: ${g}`);let p=await songloft.fs.stat(g).catch(()=>null);if(!p||!Number(p.size)||Number(p.size)<100)return whLog("error","推送准备",`文件不可用: ${g} (size=${p?.size??"N/A"})`,"❌"),songloft.log.error(`[webhook] playable file missing or empty: ${g}`),!1;let k=JSON.stringify({account_id:t,device_id:r,url:l}),R={"Content-Type":"application/json"};i&&(R.Authorization=`Bearer ${i}`);let y=await whNt("/mina/play-url",n);songloft.log.info(`[webhook] POST ${y}`),whLog("voice","指令推送音响",`url="${l}"`,null);let h=await fetch(y,{method:"POST",headers:R,body:k});songloft.log.info(`[webhook] status=${h.status}`);let m=await h.text();songloft.log.info(`[webhook] response(${m.length}): ${m.substring(0,200)}`);let P=!1;if(h.ok)try{P=!!JSON.parse(m).success}catch{P=m.includes("success")}if(songloft.log.info(`[webhook] pushed to miot: ${P?"OK":"FAILED"} book="${o.title}" ch="${e.title}`),P){let b=e.duration??0;try{b=await H(e.fileRelPath),b>0?songloft.log.info(`[push] probed dur=${b}s for "${o.title}" #${e.index}`):(songloft.log.warn(`[push] probe returned 0, using cached: ${b}s`),b=e.duration??0)}catch($){songloft.log.warn(`[push] probe failed: ${String($)}, using cached`),b=e.duration??0}n.setProgress(o.id,e.id,s,b).catch(()=>{});let w=typeof e.index=="number"?e.index:0;whOt(t,r,o.id,e.id,w,o.title),whQ[o.id+"_"+r]=Date.now(),await n.addRecentlyPlayed(o.id,e.id).catch(()=>{}),whGetTok().then($=>whXt(n,t,r,o,e,$)).catch(()=>{})}return P}catch(i){let a=i instanceof Error?i.message:String(i);return whLog("error","推送音响失败",`book="${o?.title||"?"}" ch="${e?.title||"?"}" err=${a}`,"❌"),songloft.log.error(`[webhook] push failed: book="${o?.title||"?"}" ch="${e?.title||"?"}" err=${a}`),!1}}
+async function whYt(n){let t=n.account_id,r=n.device_id;return!t||!r?{reason:"请求体缺少 account_id / device_id，请由 miot-plus 自动传递（勿手动构造空 payload）"}:(songloft.log.info(`[webhook] target from payload: aid=${t} did=${r}`),{accountId:t,deviceId:r})}
+async function whKt(n,t,r,o){let e=t.bookTitle;if(!e&&t.intent!=="NEXT_EPISODE"&&t.intent!=="PREV_EPISODE"&&t.intent!=="STOP")return whLog("error","参数缺失",`intent=${t.intent} bookTitle 为空`,"❌"),!1;let s=null;if(e&&(s=whGt(n,e),!s))return whLog("error","书籍不存在",`book="${e}"`,"❌"),!1;switch(t.intent){case"STOP":{songloft.log.info(`[webhook] STOP playback on device ${o}`);let i=whJ[o];if(i){let a=n.getBookById(i.bookId);if(a){let u=0;try{let l=await whNt(`/mina/status?account_id=${r}&device_id=${o}`,n),g=await fetch(l,{headers:{"Content-Type":"application/json"}});if(g.ok){let p=await g.json();p.success&&p.data&&(u=p.data.position??0)}}catch{}let c=a.chapters.find(l=>l.id===i.chapterId);c&&(n.setProgress(a.id,i.chapterId,u,c.duration).catch(()=>{}),songloft.log.info(`[webhook] STOP saved progress: "${a.title}" #${i.chapterIndex} "${c.title}" pos=${u}s`),whLog("voice","停止播放并保存进度",`${a.title} #${i.chapterIndex} pos=${u.toFixed(0)}s/${c.duration}s`,null)),await n.addRecentlyPlayed(a.id,i.chapterId),songloft.log.info(`[webhook] stopped book "${a.title}" #${i.chapterIndex}, updated recentlyPlayed`)}}else whLog("voice","停止播放",`msg="${t.rawQuery}"`,null);return whEt(o),!0}case"PLAY_EPISODE":{let i=t.chapterIndex,a=n.getBookById(s.id)?.chapters??[];if(a.length===0)return whLog("error","执行失败",`"${s.title}" 无章节`,"❌"),!1;if(!i||i<1)return whLog("error","章节号无效",`book="${e}" chapterIndex=${i}`,"❌"),!1;let u=Math.max(1,Math.min(i,a.length)),c=a.find(l=>l.index===u);return c?(songloft.log.info(`[webhook] PLAY_EPISODE "${s.title}" #${c.index} "${c.title}"`),await whPush(n,r,o,s,c,0)):(whLog("error","章节不存在",`book="${e}" chapterIndex=${i}`,"❌"),!1)}case"PLAY_BOOK":{let a=n.getRecentlyPlayed().find(c=>c.bookId===s.id),u=0;if(a){let c=n.getProgress(s.id,a.chapterId);u=c.position>10?c.position:0,songloft.log.info(`[webhook] PLAY_BOOK "${s.title}" resume at ${u}s from ch=${a.chapterId}`)}else{let c=n.getBookById(s.id);songloft.log.info(`[webhook] PLAY_BOOK "${s.title}" first time, ${c?.chapters?.length||0} chapters`),u=0}if(a){let c=n.getChapter(s.id,a.chapterId);return c?await whPush(n,r,o,s,c,u):(whLog("error","章节缺失",`book="${e}" chapterId=${a.chapterId}`,"❌"),!1)}else{let l=n.getBookById(s.id)?.chapters?.[0];return l?await whPush(n,r,o,s,l,0):(whLog("error","无可用章节",`book="${e}" 暂无章节`,"❌"),!1)}}case"NEXT_EPISODE":{let i=whJ[o];if(!i)return whLog("error","无会话","尚未推送过有声书，请先播放某本书","❌"),!1;let a=n.getBookById(i.bookId);if(!a)return whLog("error","书籍不存在",`bookId=${i.bookId}`,"❌"),!1;let u=a.chapters.find(l=>l.id===i.chapterId);if(!u)return whLog("error","当前章节缺失",`chapterId=${i.chapterId}`,"❌"),!1;let c=a.chapters.find(l=>l.index===u.index+1);return c?(songloft.log.info(`[webhook] NEXT_EPISODE "${a.title}" #${u.index} → #${c.index}`),await whPush(n,r,o,a,c,0)):(songloft.log.info("[webhook] NEXT_EPISODE: already at end"),!1)}case"PREV_EPISODE":{let i=whJ[o];if(!i)return whLog("error","无会话","尚未推送过有声书，请先播放某本书","❌"),!1;let a=n.getBookById(i.bookId);if(!a)return whLog("error","书籍不存在",`bookId=${i.bookId}`,"❌"),!1;let u=a.chapters.find(l=>l.id===i.chapterId);if(!u)return whLog("error","当前章节缺失",`chapterId=${i.chapterId}`,"❌"),!1;let c=a.chapters.find(l=>l.index===u.index-1);return c?(songloft.log.info(`[webhook] PREV_EPISODE "${a.title}" #${u.index} → #${c.index}`),await whPush(n,r,o,a,c,0)):(songloft.log.info("[webhook] PREV_EPISODE: already at start"),!1)}default:return whLog("error","未知意图",`intent=${t.intent}`,"❌"),!1}}
+function whEt(n){whL[n]&&(clearInterval(whL[n]),delete whL[n]),delete whUnd[n],delete whQ[n]}
+async function whXt(n,t,r,o,e,s){whEt(r);let i=typeof e.index=="number"?e.index:0;whUnd[r]={accountId:t,bookId:o.id,chapterId:e.id,chapterIndex:i,bookTitle:o.title};let a=n.getProgress(o.id,e.id)?.duration??0;if(!a||a<=0){try{a=await H(e.fileRelPath);if(a>0){n.setProgress(o.id,e.id,0,a).catch(()=>{});songloft.log.info("[auto-next] probed dur="+a+"s for "+JSON.stringify(o.title)+" #"+i)}else{a=e.duration??0;songloft.log.warn("[auto-next] probe returned 0, using cached: "+a+"s")}whLog("speaker","自动下一集已开启",o.title+" "+e.title+" dur="+a+"s → 等待播放结束",null)}catch(c){songloft.log.warn("[auto-next] probe error: "+String(c)+", using cached");a=e.duration??0;whLog("speaker","自动下一集已开启",o.title+" "+e.title+" (dur未知) → 等待播放结束",null)}}
+else whLog("speaker","自动下一集已开启",o.title+" "+e.title+" (dur="+a+"s)",null);
+if(a>0){let u=setInterval(async()=>{try{let c=await n.getProgress(o.id,e.id);if(c&&c.position>0&&c.position>=a-3){clearInterval(u);whL[r]=null;let x=n.getBookById(o.id);if(x){let w=x.chapters.find(z=>z.index===i+1);if(w){let T=typeof w.index=="number"?w.index:0;whOt(t,r,o.id,w.id,T,o.title);whUnd[r]={accountId:t,bookId:o.id,chapterId:w.id,chapterIndex:T,bookTitle:o.title};whLog("speaker","自动下一章推送成功",o.title+" "+w.title,"✅");try{await whPush(n,t,r,o,w,0)}catch(_){}}else{whLog("speaker","自动下一集已结束",o.title+" 已达最后一集",null);songloft.log.info("[auto-next] reached last chapter");whEt(r)}}else whEt(r)}}catch(_){}},3e3);whL[r]=u}}
+function whGt(n,t){let o=t.toLowerCase(),e=null,s=0;for(let a of n.books){if(a.virt||a.hidden||a.mergedInto)continue;let ov=n.settings&&n.settings.titleOverrides?n.settings.titleOverrides[a.id]||"":"";for(let c of [a.title||"",ov]){let ci=c.toLowerCase();if(!ci)continue;if(ci===o)return n.getBookById(a.id);if(ci.includes(o)&&c.length>s){e=n.getBookById(a.id);s=c.length}}}return e}
+
+// ===== Webhook 路由 =====
+async function whExec(g,aid,did){try{var _dk="d"+(did||"")+"|"+String(g).trim(),_nn=Date.now();if(WHSEEN[_dk]&&_nn-WHSEEN[_dk]<8000){songloft.log.info("[webhook] dup ignored: "+g);return{executed:false,reason:"dup"}}if(Object.keys(WHSEEN).length>300)WHSEEN={};WHSEEN[_dk]=_nn;var p=whBt(String(g).trim());if(!p){songloft.log.info("[webhook] non-matching intent: "+g);whLog("speaker","意图未匹配","msg="+g,null);return{executed:false,reason:"no_match"}}songloft.log.info("[webhook] matched intent: "+p.intent+" book="+p.bookTitle+" chapter="+p.chapterIndex);whLog("voice","意图匹配","msg="+g+" "+p.intent+" book="+p.bookTitle+" chapter="+p.chapterIndex,null);var k=await whYt({account_id:aid,device_id:did});if("reason" in k){whLog("error","设备查找",k.reason,"\u274c");return{error:k.reason}}var ok=await whKt(t,p,k.accountId,k.deviceId);if(ok){var lab=p.intent==="PLAY_EPISODE"?"播放章节":p.intent==="PLAY_BOOK"?"播放书籍":p.intent==="NEXT_EPISODE"?"下一集":p.intent==="PREV_EPISODE"?"上一集":p.intent==="STOP"?"停止播放":"未知";whLog("voice",lab,"msg="+g,"\u2705");return{executed:true,intent:p.intent,bookTitle:p.bookTitle}}whLog("error","执行失败","msg="+g+" "+p.intent+" book="+p.bookTitle,"\u274c");return{error:"执行失败"}}catch(e){songloft.log.error("[webhook] exec error: "+String(e));return{error:String((e&&e.message)||e)}}}
+var WHPOLL={timer:null,lastTs:0,ready:false,busy:false,lastErr:"",hits:0,hookSync:"",hookAt:0};
+var WHSEEN={};var WHDUP={};
+
+async function whPollTick(){if(WHPOLL.busy)return;WHPOLL.busy=true;try{if(!WhEnabled(t))return;var tk=await whGetTok();if(!tk)return;var hh=t.getSettings().serverHost||"";if(!hh)return;var r=await fetch(hh+"/api/v1/jsplugin/miot/conversation/messages?limit=20",{headers:{Authorization:"Bearer "+tk}});if(!r||!r.ok){WHPOLL.lastErr="http "+String((r&&r.status)||0);return}var j=await r.json();var arr=(j&&j.data)||[];if(!arr.length)return;var mx=0,news=[];for(var i=0;i<arr.length;i++){var m0=arr[i]||{};var ts=Number(m0.timestamp||0)||0;if(ts>mx)mx=ts;if(WHPOLL.ready&&ts>WHPOLL.lastTs)news.push(m0)}if(!WHPOLL.ready){WHPOLL.lastTs=mx;WHPOLL.ready=true;songloft.log.info("[webhook] miot poll primed lastTs="+mx);return}if(mx>WHPOLL.lastTs)WHPOLL.lastTs=mx;for(var i2=0;i2<news.length;i2++){var m1=news[i2];var q=String(m1.query||"").trim();if(!q)continue;songloft.log.info("[webhook] miot poll query: "+q);WHPOLL.hits++;try{await whExec(q,m1.account_id,m1.device_id)}catch(e){songloft.log.error("[webhook] poll exec error: "+String(e))}}}catch(e){WHPOLL.lastErr=String((e&&e.message)||e)}finally{WHPOLL.busy=false}}
+function whPollStart(){if(WHPOLL.timer)return;WHPOLL.timer=setInterval(function(){whPollTick()},15000);songloft.log.info("[webhook] miot conversation poll started")}
+setTimeout(whPollStart,10000);
+async function whSyncHook(){try{if(!WhEnabled(t))return "webhook_disabled";var tk=await whGetTok();if(!tk)return "no_token";var hh=t.getSettings().serverHost||"";if(!hh)return "no_host";var AH={Authorization:"Bearer "+tk};var lr=await fetch(hh+"/api/v1/jsplugin/miot/conversation/webhooks",{headers:AH});if(!lr||!lr.ok)return "list_"+String((lr&&lr.status)||0);var lj=await lr.json();var arr=(lj&&lj.data)||[];var del=0;for(var i=0;i<arr.length;i++){var w=arr[i]||{};if(String(w.url||"").indexOf("/audiobook/api/webhook/said")>=0){del++;try{await fetch(hh+"/api/v1/jsplugin/miot/conversation/webhooks?id="+w.id,{method:"DELETE",headers:AH})}catch(e){}}}var url=hh+"/api/v1/jsplugin/audiobook/api/webhook/said?token="+WhToken(t)+"&access_token="+tk;var ar=await fetch(hh+"/api/v1/jsplugin/miot/conversation/webhooks",{method:"POST",headers:{Authorization:"Bearer "+tk,"Content-Type":"application/json"},body:JSON.stringify({name:"audiobook-auto",url:url})});if(!ar||!ar.ok)return "add_"+String((ar&&ar.status)||0);WHPOLL.hookAt=Date.now();return "ok_replaced_"+del;}catch(e){return "ERR "+String((e&&e.message)||e)}}
+async function whSyncTick(){try{var r0=await whSyncHook();WHPOLL.hookSync=r0;if(String(r0).indexOf("ok")!==0)songloft.log.warn("[webhook] miot hook sync: "+r0);else songloft.log.info("[webhook] miot hook sync: "+r0)}catch(e){}}
+setTimeout(whSyncTick,12000);
+setInterval(whSyncTick,6*3600*1000);
+
+s.post("/api/webhook/said",async function(o){
+  try{
+    if(!WhEnabled(t))return whD({success:false,error:"Webhook 未启用"},503);
+    var s0=whB(o.query||"").token||"";
+    var i0=o.headers?.["X-Webhook-Token"]||"";
+    var a0=s0||i0;
+    whLog("config","------------------------------------",null,null);
+    if(!WhVerify(t,a0)){whLog("error","认证失败","无效或缺失 token","❌");return whD({success:false,error:"认证失败"},401)}
+    var u={};
+    try{var y=typeof o.body=="string"?o.body:"";if(y)u=JSON.parse(y)}catch(_){}
+    var c=u.message,l=u.messages,g=whWt(l||[],c);var wts=0;try{for(var wi=0;wi<(l||[]).length;wi++){var wm=l[wi]||{};var wt0=Number(((wm.message||{}).timestamp_ms)||wm.timestamp||0)||0;if(wt0>wts)wts=wt0}}catch(_){}if(wts){if(WHSEEN[wts]){return whD({success:true,data:{executed:false,reason:"duplicate_ts"}})}WHSEEN[wts]=1;if(wts>WHPOLL.lastTs)WHPOLL.lastTs=wts;var ks=Object.keys(WHSEEN);if(ks.length>200){for(var ki=0;ki<ks.length-100;ki++)delete WHSEEN[ks[ki]]}}
+    var _did=String(u.device_id||((l&&l[0])||{}).device_id||""),_dk=_did+"|"+String(g).trim(),_nn=Date.now();if(WHDUP[_dk]&&_nn-WHDUP[_dk]<8000){songloft.log.info("[webhook] dup content ignored: "+g);return whD({success:true,data:{executed:false,reason:"dup_content"}})}if(Object.keys(WHDUP).length>200)WHDUP={};WHDUP[_dk]=_nn;if(!g||!g.trim()){whLog("speaker","空消息","忽略空请求","❌");return whD({success:true,data:{executed:false,reason:"empty_message"}})}
+    var p=whBt(g.trim());
+    if(!p){songloft.log.info("[webhook] non-matching intent: "+g);whLog("speaker","意图未匹配","msg="+g,null);return whD({success:true,data:{executed:false,reason:"no_match"}})}
+    songloft.log.info("[webhook] matched intent: "+p.intent+" book="+p.bookTitle+" chapter="+p.chapterIndex);
+    whLog("voice","意图匹配","msg="+g+" "+p.intent+" book="+p.bookTitle+" chapter="+p.chapterIndex,null);
+    var k=await whYt(u);
+    if("reason" in k){whLog("error","设备查找",k.reason,"❌");return whD({success:false,error:k.reason})}
+    var ok=await whKt(t,p,k.accountId,k.deviceId);
+    if(ok){whLog("voice",p.intent==="PLAY_EPISODE"?"播放章节":p.intent==="PLAY_BOOK"?"播放书籍":p.intent==="NEXT_EPISODE"?"下一集":p.intent==="PREV_EPISODE"?"上一集":p.intent==="STOP"?"停止播放":"未知","msg="+g,"✅");return whD({success:true,data:{executed:true,intent:p.intent,bookTitle:p.bookTitle}})}
+    whLog("error","执行失败","msg="+g+" "+p.intent+" book="+p.bookTitle,"❌");return whD({success:false,error:"执行失败"})
+  }catch(e){songloft.log.error("[webhook] error: "+String(e));whLog("error","处理异常",e.message||String(e),"❌");return whD({success:false,error:e.message||String(e)})}
+}),
+s.get("/api/diag/loopback",async function(){try{var tk=WhToken(t);var res=[];var hosts=["http://127.0.0.1:58090","http://localhost:58090",(t.getSettings().serverHost||"")];for(var hi=0;hi<hosts.length;hi++){var h0=hosts[hi];if(!h0)continue;try{var rr=await fetch(h0+"/api/v1/jsplugin/audiobook/api/webhook/said?token="+tk,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:"__diag_noauth__"})});var bb=await rr.text();res.push({host:h0,status:rr.status,body:String(bb).substring(0,120)});}catch(e){res.push({host:h0,error:String((e&&e.message)||e)})}}return whD({success:true,data:res});}catch(e){return whD({success:false,error:String((e&&e.message)||e)})}}),s.get("/api/diag/miotpoll",async function(){try{var tk="";try{tk=(await whGetTok())||""}catch(_){}var hh=t.getSettings().serverHost||"http://192.168.1.69:58090";var out={};try{var r1=await fetch(hh+"/api/v1/jsplugin/miot/conversation/messages?limit=5",{headers:{Authorization:"Bearer "+tk}});out.withAuth={status:r1.status,body:String(await r1.text()).substring(0,300)}}catch(e){out.withAuth="ERR "+String(e&&e.message||e)}try{var r2=await fetch(hh+"/api/v1/jsplugin/miot/conversation/messages?limit=5");out.noAuth={status:r2.status,body:String(await r2.text()).substring(0,150)}}catch(e){out.noAuth="ERR "+String(e&&e.message||e)}out.tokPrefix=tk?tk.substring(0,10):"EMPTY";return whD({success:true,data:out});}catch(e){return whD({success:false,error:String((e&&e.message)||e)})}}),s.get("/api/diag/miotpoll-status",async function(){return whD({success:true,data:{ready:WHPOLL.ready,lastTs:WHPOLL.lastTs,hits:WHPOLL.hits,lastErr:WHPOLL.lastErr,timer:!!WHPOLL.timer,enabled:WhEnabled(t)}})}),
+s.get("/api/diag/miotpoll-status",async function(){return whD({success:true,data:{ready:WHPOLL.ready,lastTs:WHPOLL.lastTs,hits:WHPOLL.hits,lastErr:WHPOLL.lastErr,timer:!!WHPOLL.timer,enabled:WhEnabled(t)}})}),
+s.get("/api/diag/miothook",async function(){try{var tk="";try{tk=(await whGetTok())||""}catch(_){}var out={tokLen:tk.length};try{var p=String(tk).split(".")[1]||"";p=p.replace(/-/g,"+").replace(/_/g,"/");while(p.length%4)p+="=";var pl=JSON.parse(Buffer.from(p,"base64").toString("utf8"));out.jwtExp=pl.exp||0;out.jwtIat=pl.iat||0;out.jwtSub=String(pl.sub||pl.user_id||pl.username||"").substring(0,20);out.expireInHours=pl.exp?((pl.exp*1000-Date.now())/3600000).toFixed(2):"?"}catch(e){out.jwtErr=String(e&&e.message||e)}var hh=t.getSettings().serverHost||"";out.host=hh;try{var lg=await fetch(hh+"/api/v1/jsplugins",{headers:{Authorization:"Bearer "+tk}});out.listPlugins=lg.status}catch(e){out.listPlugins="ERR "+e.message}var url=hh+"/api/v1/jsplugin/audiobook/api/webhook/said?token="+WhToken(t)+"&access_token="+tk;try{var ar=await fetch(hh+"/api/v1/jsplugin/miot/conversation/webhooks",{method:"POST",headers:{Authorization:"Bearer "+tk,"Content-Type":"application/json"},body:JSON.stringify({name:"__diag_probe",url:url})});out.add=ar.status;out.addBody=String(await ar.text()).substring(0,200)}catch(e){out.add="ERR "+e.message}try{var lr=await fetch(hh+"/api/v1/jsplugin/miot/conversation/webhooks",{headers:{Authorization:"Bearer "+tk}});var lj=await lr.json();out.list=(lj.data||[]).map(function(x){return x.id+"|"+x.name});for(var i=0;i<(lj.data||[]).length;i++){var w=lj.data[i];if(w.name==="__diag_probe"){var dr=await fetch(hh+"/api/v1/jsplugin/miot/conversation/webhooks?id="+w.id,{method:"DELETE",headers:{Authorization:"Bearer "+tk}});out.delSelf=dr.status}}}catch(e){out.listErr=String(e&&e.message||e)}return whD({success:true,data:out});}catch(e){return whD({success:false,error:String((e&&e.message)||e)})}}),
+s.post("/api/webhook/sync-miot",async function(){try{var r0=await whSyncHook();WHPOLL.hookSync=r0;return whD({success:String(r0).indexOf("ok")===0,data:{result:r0}})}catch(e){return whD({success:false,error:String((e&&e.message)||e)})}}),
+s.get("/api/webhook/config",async function(){var o=WhEnabled(t),e=whJt(),s0=WhToken(t),i0=t.getSettings().serverHost||"";return whD({success:true,data:{enabled:o,url:"/api/v1/jsplugin/audiobook/api/webhook/said",token:s0,serverHost:i0}})}),
+s.post("/api/webhook/toggle",async function(o){
+  try{var e={};try{var a=typeof o.body=="string"?o.body:"";if(a)e=JSON.parse(a)}catch(_){}
+  var s0=!!e.enabled,i0=typeof e.server_host=="string"?e.server_host:void 0;
+  await WhSet(t,s0,i0);return whD({success:true,data:{enabled:s0}})}
+  catch(e){return whD({success:false,error:e.message||String(e)})}
+}),
+s.post("/api/webhook/regenerate-token",async function(){
+  try{var o=await WhRegen(t);songloft.log.info("[webhook] token regenerated");whLog("config","token 已更新",null,null);return whD({success:true,data:{token:o}})}
+  catch(o){return whD({success:false,error:o.message||String(o)})}
+}),
+s.get("/api/logs",async function(){return whD({success:true,data:whI})}),
+s.post("/api/logs",async function(){whI.length=0;return whD({success:true,data:{cleared:true}})}),
+s.post("/api/session/update",async function(o){
+  try{var e=typeof o.body=="string"?JSON.parse(o.body):{},s0=e.accountId;
+  if(s0){whOt(s0,e.deviceId||"",e.bookId||"",e.chapterId||"",Number(e.chapterIndex)||0,e.bookTitle||"");return whD({success:true})}
+  return whD({success:false,error:"missing accountId"},400)}
+  catch(e){return whD({success:false,error:e.message||String(e)})}
+}),
+''').rstrip().rstrip(",") + "})(),"
+        wh_routes_old = 's.post("/api/advanced-cache/clear",async o=>{'
+        assert src.count(wh_routes_old) == 1, "webhook \u6ce8\u5165\u951a\u70b9\u6570\u91cf\u5f02\u5e38: %d" % src.count(wh_routes_old)
+        src = src.replace(wh_routes_old, WH_ROUTES + wh_routes_old)
+
 
     return src
 
@@ -1677,6 +1781,40 @@ s.get("/api/similar-execute-progress",async()=>{let j=t.__simJob;return f({succe
 # 官方 zip 每次构建都会重新拷贝 static/，补丁必须在每次构建时重新应用（锚点 + assert 唯一）。
 # JS 片段里的中文一律用 \uXXXX 转义（与原 bundle 风格一致，避免编码问题）；
 # HTML/CSS 用 UTF-8 中文原文。
+# ===== Webhook 口令搜索前端资源（v1.1.3 官方 UI 移植；JS 中文经 _u 转义）=====
+WH_FRONT_JS = _u(r'''// ===== Webhook 口令搜索设置（v1.1.3 官方 UI 移植，__wh 前缀防冲突）=====
+var __whColl=!0,__whToken="",__whEnabled=!1;
+function __whOrigin(){try{var l=window.location;if(l){if(l.origin)return l.origin;if(typeof l.href=="string"){var m=l.href.match(/^https?:\/\/[^\/]+/);if(m)return m[0]}}}catch(e){}return ""}
+function __whFullUrl(){var e="/api/v1/jsplugin/audiobook/api/webhook/said",t=__whToken?"?token="+encodeURIComponent(__whToken):"";return __whOrigin()+e+t}
+function __whSetColl(){var e=document.getElementById("webhookDetails"),t=document.getElementById("webhookArrow");e&&(e.hidden=__whColl),t&&(t.style.transform=__whColl?"rotate(0deg)":"rotate(90deg)")}
+function __whInitColl(){var e=document.getElementById("webhookHeader");e&&!e.dataset.whBound&&(e.dataset.whBound="1",e.addEventListener("click",function(t){t.target.closest("#webhookToggle")||t.target.closest(".slider")||(__whColl=!__whColl,__whSetColl())}),__whSetColl())}
+async function __whLoad(){var e=document.getElementById("webhookStatus"),t=document.getElementById("webhookToggle");if(!e||!t)return;try{var o=await y("/api/webhook/config");__whEnabled=!!o.enabled,__whToken=o.token||"",t.checked=__whEnabled,e.textContent=__whEnabled?"已启用":"已关闭";var r=document.getElementById("webhookUrl");r&&(r.textContent=__whEnabled?__whFullUrl():(o.url||"")+"/（未启用）")}catch(i){e.textContent="加载失败"}}
+async function __whToggleChange(){var e=document.getElementById("webhookToggle"),t=document.getElementById("webhookStatus");if(!e||!t)return;var o=e.checked;try{var r={enabled:o};o&&(r.server_host=__whOrigin()),await y("/api/webhook/toggle",{method:"POST",body:JSON.stringify(r)}),__whEnabled=o,t.textContent=o?"已启用":"已关闭",o&&(document.getElementById("webhookUrl").textContent=__whFullUrl()),u(o?"语音口令已启用":"语音口令已关闭")}catch(i){e.checked=!__whEnabled,u("切换失败: "+i.message)}}
+async function __whCopyUrl(){try{await navigator.clipboard.writeText(__whFullUrl()),u("回调地址已复制到剪贴板")}catch(e){var t=document.getElementById("webhookUrl");if(t){t.focus();var r=document.createRange();r.selectNodeContents(t);var o=window.getSelection();o&&(o.removeAllRanges(),o.addRange(r))}try{document.execCommand("copy"),u("已复制")}catch(i){u("复制失败，请手动复制")}}}
+async function __whRegen(){var e=document.getElementById("btnResetToken");if(e&&confirm("确定重新生成 Token？旧 Token 将立即失效。")){e.disabled=!0,e.textContent="重置中...";try{await y("/api/webhook/regenerate-token",{method:"POST"}),__whToken="",await __whLoad(),u("Token 已重置")}catch(t){u("重置失败: "+t.message)}finally{e.disabled=!1,e.textContent="🔄 重置Token"}}}
+async function __whOpen(){__whInitColl();var e=document.getElementById("webhookToggle");e&&!e.dataset.whBound2&&(e.dataset.whBound2="1",e.addEventListener("change",__whToggleChange));var t=document.getElementById("btnCopyWebhook");t&&!t.dataset.whBound2&&(t.dataset.whBound2="1",t.addEventListener("click",__whCopyUrl));var r=document.getElementById("btnResetToken");r&&!r.dataset.whBound2&&(r.dataset.whBound2="1",r.addEventListener("click",__whRegen)),await __whLoad()}''')
+
+WH_CSS = r'''/* ===== v1.3.62 Webhook 设置区（口令搜索）===== */
+.settings-webhook-row { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+.settings-webhook-arrow { display: inline-block; font-size: 12px; color: var(--text-3); }
+.settings-webhook-status { font-size: 13px; color: var(--text-3); white-space: nowrap; }
+.switch { position: relative; display: inline-block; width: 52px; height: 32px; cursor: pointer; flex-shrink: 0; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: var(--md-outline-variant); border: 2px solid var(--md-outline); border-radius: 16px; transition: all .2s; }
+.slider::before { content: ''; position: absolute; top: 4px; left: 4px; width: 20px; height: 20px; border-radius: 50%; background: var(--md-outline); transition: transform .2s, background .2s; }
+.switch input:checked + .slider { background: var(--md-primary); border-color: var(--md-primary); }
+.switch input:checked + .slider::before { transform: translateX(20px); background: var(--md-on-primary); }
+.settings-webhook-url-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.settings-webhook-url { font-size: 12px; color: var(--primary); word-break: break-all; flex: 1; min-width: 200px; padding: 6px 10px; background: var(--surface-2); border-radius: 6px; }
+.settings-webhook-help { font-size: 12px; color: var(--text-3); margin-top: 8px; line-height: 1.6; }
+.webhook-commands-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 4px; }
+.webhook-commands-table th, .webhook-commands-table td { border: 1px solid var(--md-outline-variant); padding: 6px 8px; text-align: left; vertical-align: top; }
+.webhook-commands-table th { background: var(--surface-2); font-weight: 600; white-space: nowrap; }
+.webhook-commands-table td code { font-size: 11px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; word-break: break-all; }
+.webhook-commands-table tfoot td { color: var(--text-3); font-size: 11px; }
+.webhook-commands-hint { font-size: 11px; color: var(--error, #d33); margin-top: 6px; }'''
+
+
 def patch_static(build_dir: str) -> None:
     import glob as _glob
 
@@ -1788,6 +1926,44 @@ def patch_static(build_dir: str) -> None:
               "          <div class=\"settings-section\">\n"
               "            <div class=\"settings-section-title\">转码缓存</div>\n")
     html = rep(html, h3_old, h3_new, "H3")
+
+    # H7: 设置弹窗「转码缓存」与「关于」之间插入 Webhook 可折叠设置区（默认折叠）
+    h7_old = ('          <div class="settings-section">\n'
+              '            <div class="settings-section-title">关于</div>\n')
+    h7_new = ('          <div class="settings-section">\n'
+              '            <div class="settings-webhook-row" id="webhookHeader" style="align-items:center;cursor:pointer;user-select:none;">\n'
+              '              <span class="settings-webhook-arrow" id="webhookArrow" style="margin-right:6px;transition:transform .2s;">▶</span>\n'
+              '              <div class="settings-section-title" style="margin:0;padding:0;border:none;font-size:inherit;flex:1;">语音口令（智能音箱点播）</div>\n'
+              '              <span class="settings-webhook-status" id="webhookStatus">加载中...</span>\n'
+              '              <label class="switch" style="margin-left:8px;">\n'
+              '                <input type="checkbox" id="webhookToggle">\n'
+              '                <span class="slider"></span>\n'
+              '              </label>\n'
+              '            </div>\n'
+              '            <div id="webhookDetails" hidden>\n'
+              '              <div class="settings-webhook-url-row">\n'
+              '                <code class="settings-webhook-url" id="webhookUrl">/api/v1/jsplugin/audiobook/api/webhook/said</code>\n'
+              '                <button class="btn btn-ghost btn-sm" id="btnCopyWebhook" type="button">📋 复制地址</button>\n'
+              '                <button class="btn btn-ghost btn-sm" id="btnResetToken" type="button">🔄 重置Token</button>\n'
+              '              </div>\n'
+              '              <div class="settings-webhook-help">开启后即可用音箱语音口令点播有声书（回调地址会自动写入智能音箱插件，无需手动填写）。<b>关闭后音箱语音口令将不再响应。</b></div>\n'
+              '              <div class="settings-section-title" style="margin-top:12px;margin-bottom:6px;font-size:0.95rem;">支持的语音指令</div>\n'
+              '              <table class="webhook-commands-table">\n'
+              '                <thead><tr><th>意图</th><th>示例口令</th></tr></thead>\n'
+              '                <tbody>\n'
+              '                  <tr><td>播放有声书（续听）</td><td><code>「播放有声书」三国演义</code>、<code>「有声书」三国</code></td></tr>\n'
+              '                  <tr><td>指定章节播放</td><td><code>「播放有声书」三国演义第三十回</code>、<code>「有声书」三国第五章</code></td></tr>\n'
+              '                  <tr><td>下一集</td><td><code>下一集</code>、<code>下一章</code>、<code>下一段</code>、<code>下一节</code>、<code>下一回</code></td></tr>\n'
+              '                  <tr><td>上一集</td><td><code>上一集</code>、<code>上一章</code>、<code>上一段</code>、<code>上一节</code>、<code>上一回</code></td></tr>\n'
+              '                </tbody>\n'
+              '                <tfoot><tr><td colspan="2">章节标识词统一为：集 / 章 / 段 / 节 / 回；停止口令：暂停 / 停止播放</td></tr></tfoot>\n'
+              '              </table>\n'
+              '              <div class="webhook-commands-hint"><b>PS：请确保上述口令词未与音响插件已有口令冲突！</b></div>\n'
+              '            </div>\n'
+              '          </div>\n'
+              + h7_old)
+    html = rep(html, h7_old, h7_new, "H7")
+
 
     # ===== v1.3.9 最近播放清理 + 页码跳转（HTML 结构）=====
     # H5: 「最近播放」标题后加「清空」按钮（复用已有的 .section-title-row 布局）
@@ -2265,7 +2441,7 @@ def patch_static(build_dir: str) -> None:
         'try{__syncViewModeUI()}catch(_){}\n'
         'try{__syncAllPrefs()}catch(_){}\n'
         'try{__bindPrefEvents()}catch(_){}\n'
-        'try{window.__prefsSnap=__collectPrefs()}catch(_){window.__prefsSnap=null}}\n'
+        'try{window.__prefsSnap=__collectPrefs()}catch(_){window.__prefsSnap=null}try{__whOpen()}catch(_){}}\n'
         'try{window.addEventListener("pagehide",function(){try{__commitPrefs()}catch(_){}})}catch(_){}\n'
         'try{document.addEventListener("visibilitychange",function(){if(document.visibilityState==="hidden"){try{__commitPrefs()}catch(_){}}})}catch(_){}\n'
         # v1.3.38 真因修复：原 __syncViewModeUI 只回填 viewMode/prefViewDesktop/prefViewMobile，
@@ -3423,6 +3599,13 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
     j_adv_boot_new = 'document.getElementById("btnCleanCache").addEventListener("click",ve);__bindAdvCache();}'
     js = rep(js, j_adv_boot_old, j_adv_boot_new, "J_ADV_BOOT")
 
+    # W-JS: Webhook 设置区前端逻辑（注入到 bundle 主 IIFE 闭合之前！
+    #   v1.3.62 血泪：追加到文件末尾会在 IIFE 外面，访问不到闭包内的 y()/u()，
+    #   导致 __whLoad 里 y is not defined → 设置区显示「加载失败」、切换时 u is not defined。
+    #   注入到 window.app=...;})(); 前，y/u 同闭包可用（函数声明提升，末尾调用无碍）。）
+    _wh_anchor = 'window.app={loadSnapshot:X,triggerRescan:Z};})();'
+    assert js.count(_wh_anchor) == 1, f"webhook IIFE anchor count={js.count(_wh_anchor)}"
+    js = js.replace(_wh_anchor, 'window.app={loadSnapshot:X,triggerRescan:Z};\n' + WH_FRONT_JS + '\n})();')
     open(js_path, "w", encoding="utf-8", newline="").write(js)
     # 前端语法自检：minified 单行 bundle 里的语法错误（如逗号表达式中插入 var 语句）
     # 必须在构建阶段拦下，否则只在浏览器运行时静默抛 SyntaxError、整个前端不工作。
@@ -3704,6 +3887,8 @@ async function Y(){try{let t=(await y("/api/recently-played")).items||[]'''
 .sp-foot{display:flex;justify-content:flex-end;margin-top:10px}'''
         ".book-hero-desc .desc-more{color:var(--primary,#3b82f6);cursor:pointer;margin-left:8px;font-size:13px;white-space:nowrap}\n"
     )
+    # W-CSS: Webhook 设置区样式（slider 不用 inset 简写，显式四边，兼容 WebF）
+    css = css.rstrip() + "\n\n" + WH_CSS + "\n"
     open(css_path, "w", encoding="utf-8", newline="").write(css)
 
     # HC: 静态资源 cache-busting（v1.3.37）
