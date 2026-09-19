@@ -66,7 +66,7 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 # 插件版本：同时写入 plugin.json 和 JS 源码里硬编码的 ot 常量（快照接口会返回它）。
 # 可被环境变量 PLUGIN_VERSION 覆盖（CI 打 tag 时传入 tag 名，使产物版本与 tag 一致）。
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.66"
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION") or "1.3.70"
 
 # ---------- 1. 从 main.jsc 提取完整 main.js 源码 ----------
 def extract_source(zf: zipfile.ZipFile) -> str:
@@ -272,14 +272,15 @@ def patch_ui(src: str) -> str:
     p8a_old = "this.settings={favorites:[],recentlyPlayed:[]};"
     p8a_new = ('this.settings={favorites:[],recentlyPlayed:[],'
                'uiPrefs:{viewDesktop:"large",viewMobile:"large"},'
-               'titleOverrides:{},playbackRates:{}};')
+               'titleOverrides:{},playbackRates:{},voiceAliases:{}};')
     assert src.count(p8a_old) == 1, "P8a 锚点数量异常"
     src = src.replace(p8a_old, p8a_new)
 
     # P8b: list() 返回时应用别名（titleOverrides 优先于扫描标题）
     p8b_old = "return{total:g,books:a.slice(l,l+o),page:n,pageSize:o}"
     p8b_new = ("return{total:g,books:a.slice(l,l+o)"
-               ".map(__b=>({...__b,title:this.settings.titleOverrides[__b.id]||__b.title})),"
+               ".map(__b=>({...__b,title:this.settings.titleOverrides[__b.id]||__b.title,"
+               "voiceAlias:this.settings.voiceAliases[__b.id]||''})),"
                "page:n,pageSize:o}")
     assert src.count(p8b_old) == 1, "P8b 锚点数量异常"
     src = src.replace(p8b_old, p8b_new)
@@ -290,7 +291,8 @@ def patch_ui(src: str) -> str:
     p8c_new = ("getBookById(t){let n=Y({books:this.books,"
                "chaptersByBookId:this.chaptersByBookId},t);"
                "return n?{...n,title:this.settings.titleOverrides[n.id]||n.title,"
-               "originalTitle:n.title}:n}")
+               "voiceAlias:this.settings.voiceAliases[n.id]||'',"
+               "originalTitle:n.title,...(__BK_EDITS(this.settings,n)||{})}:n}")
     assert src.count(p8c_old) == 1, "P8c 锚点数量异常"
     src = src.replace(p8c_old, p8c_new)
 
@@ -341,6 +343,10 @@ def patch_ui(src: str) -> str:
         'return f({success:!0,data:{id:e.id,cleared:r}})}),')
     assert src.count(p8e_old) == 1, "P8e 锚点数量异常"
     src = src.replace(p8e_old, p8e_new)
+    # P8e2: 每本书「语音匹配名」独立字段（逗号/空格/、分隔多个），仅用于语音匹配，不参与显示
+    voice_route = ('''s.post("/api/books/:id/voice",async(o,e)=>{let r=typeof o.body=="string"?JSON.parse(o.body):o.body||{},a=String(r.voice==null?"":r.voice).trim(),n=t.getBookById(e.id);if(!n)return h("\\u672A\\u627E\\u5230\\u8BE5\\u4E66\\u7C4D",404);t.settings.voiceAliases||(t.settings.voiceAliases={});a?t.settings.voiceAliases[e.id]=a:delete t.settings.voiceAliases[e.id],await t.saveSettings();return f({success:!0,data:{id:e.id,voice:a}})}),''')
+    assert src.count('s.post("/api/books/:id/title",async(o,e)=>{') == 1, "P8e2 锚点数量异常"
+    src = src.replace('s.post("/api/books/:id/title",async(o,e)=>{', voice_route + 's.post("/api/books/:id/title",async(o,e)=>{')
 
     # P8f: settings 恢复改为深合并 —— 旧版本(v1.2.0-)存量的 settings 没有
     #       uiPrefs/titleOverrides/playbackRates 三个字段，浅合并({...this.settings,...t})
@@ -357,7 +363,9 @@ def patch_ui(src: str) -> str:
                  'uiPrefs:Object.assign({viewDesktop:"large",viewMobile:"large"},'
                  'a&&a.uiPrefs,b.uiPrefs),'
                  'titleOverrides:Object.assign({},a&&a.titleOverrides,b.titleOverrides),'
-                 'playbackRates:Object.assign({},a&&a.playbackRates,b.playbackRates)})}'
+                 'playbackRates:Object.assign({},a&&a.playbackRates,b.playbackRates),'
+                 'voiceAliases:Object.assign({},a&&a.voiceAliases,b.voiceAliases),'
+                 'bookEdits:Object.assign({},a&&a.bookEdits,b.bookEdits)})}'
                  'var K="audiobook_settings_v1"')
     assert src.count('var K="audiobook_settings_v1"') == 1, "P8f helper 锚点数量异常"
     src = src.replace('var K="audiobook_settings_v1"', ms_helper)
@@ -523,22 +531,13 @@ def patch_ui(src: str) -> str:
         assert src.count(p8k_old) == 1, "P8k 锚点数量异常"
         src = src.replace(p8k_old, p8k_new)
 
-        # __MS 深合并补 bookEdits 键（旧存量 settings 升级）
-        p8k_ms_old = 'playbackRates:Object.assign({},a&&a.playbackRates,b.playbackRates)})}'
-        p8k_ms_new = ('playbackRates:Object.assign({},a&&a.playbackRates,b.playbackRates),'
-                      'bookEdits:Object.assign({},a&&a.bookEdits,b.bookEdits)})}')
-        assert src.count(p8k_ms_old) == 1, "P8k ms 锚点数量异常"
-        src = src.replace(p8k_ms_old, p8k_ms_new)
+        # __MS 深合并补 bookEdits 键（旧存量 settings 升级）—— 已并入 ms_helper（见上方
+        # ms_helper 定义，voiceAliases 之后追加 bookEdits），此处无需再补丁。
 
         # list() 的覆盖应用并入 P17a（hidden 过滤补丁在 patch_ui 后段，见 p17a）
 
-        # getBookById：详情/元数据接口同样应用覆盖
-        p8k_gb_old = ('return n?{...n,title:this.settings.titleOverrides[n.id]||n.title,'
-                      'originalTitle:n.title}:n}')
-        p8k_gb_new = ('return n?{...n,title:this.settings.titleOverrides[n.id]||n.title,'
-                      'originalTitle:n.title,...(__BK_EDITS(this.settings,n)||{})}:n}')
-        assert src.count(p8k_gb_old) == 1, "P8k gb 锚点数量异常"
-        src = src.replace(p8k_gb_old, p8k_gb_new)
+        # getBookById 详情/元数据接口同样应用覆盖（voiceAlias + __BK_EDITS 已并入 p8c_new，
+        # 见上方 p8c 补丁，此处无需再补丁）。
 
     # P8l: 批量操作路由 —— 全部书 id（供「全选全部」，带当前关键词/收藏过滤）/
     #   batch/favorite（显式收藏/取消，非 toggle）/ batch/edit（简介前后插、分类标签作者
@@ -1252,6 +1251,8 @@ def patch_ui(src: str) -> str:
         # p17b: 快照书数同样排除被合并掉的子书
         p17b_old = 'getSnapshot(){return{books:this.books,totalBooks:this.books.length,'
         p17b_new = ('getSnapshot(){var __vb=this.books.filter(function(b){return !b.hidden});'
+                    'var __vas=(this.settings&&this.settings.voiceAliases)||{};'
+                    '__vb=__vb.map(function(__b){var __va=__vas[__b.id]||"";return __va?Object.assign({},__b,{voiceAlias:__va}):__b});'
                     'return{books:__vb,totalBooks:__vb.length,')
         assert src.count(p17b_old) == 1, "P17b 锚点数量异常"
         src = src.replace(p17b_old, p17b_new)
@@ -1344,10 +1345,10 @@ def patch_ui(src: str) -> str:
     if not globals().get("SKIP_G4", False):
         # G4a: 构造函数 settings 默认值补两个数组键 + 全局设置镜像 __CSET
         g4a_old = ('this.settings={favorites:[],recentlyPlayed:[],'
-                   'uiPrefs:{viewDesktop:"large",viewMobile:"large"},titleOverrides:{},playbackRates:{}}')
+                   'uiPrefs:{viewDesktop:"large",viewMobile:"large"},titleOverrides:{},playbackRates:{},voiceAliases:{}};')
         g4a_new = ('this.settings={favorites:[],recentlyPlayed:[],'
-                   'uiPrefs:{viewDesktop:"large",viewMobile:"large"},titleOverrides:{},playbackRates:{},'
-                   'customCollections:[],collectionPacks:[],ignoredShortsMembers:[]};__CSET=this.settings')
+                   'uiPrefs:{viewDesktop:"large",viewMobile:"large"},titleOverrides:{},playbackRates:{},voiceAliases:{},'
+                   'customCollections:[],collectionPacks:[],ignoredShortsMembers:[]};__CSET=this.settings;')
         assert src.count(g4a_old) == 1, "G4a 锚点数量异常"
         src = src.replace(g4a_old, g4a_new)
 
@@ -1688,10 +1689,11 @@ async function WhRegen(t){t.settings.webhookToken=whGen();await t.saveSettings()
 var whOtKw=["播放有声书","有声书"],whCt=/(?:第|[零一二三四五六七八九十百千万章段落节回])/,whAt={零:0,一:1,二:2,三:3,四:4,五:5,六:6,七:7,八:8,九:9,十:10,百:100,千:1e3,万:1e4},whNextKw=["下一集","下一章","下一段","下一节","下一回"],whPrevKw=["上一集","上一章","上一段","上一节","上一回"],whStopKw=["暂停播放","停止播放","暂停","停一下","pause","stop","停止","别播了","关掉","关机","关闭","休眠","休息"];
 var whT1=/第(\d+|[零一二三四五六七八九十百千万]+)[章段落节回]?/;
 function whCn(n){if(/^\d+$/.test(n))return parseInt(n,10);let t=0,r=0;for(let o of n){let e=whAt[o];if(e===void 0)break;e>=10?(r=t>0?(r||t)*e:e,t+=r,r=0):r=t>0?t*e+r:r+e}return t+r}
+function whNorm(s){if(!s)return s;return String(s).replace(/[\s，。、！？!?,.]+/g,"").replace(/[零一二三四五六七八九十百千万〇]+/g,function(m){return m.length>=2&&/^[零一二三四五六七八九〇]+$/.test(m)?m.split("").map(function(c){return c==="〇"?0:whAt[c]}).join(""):m}).toLowerCase()}
 function whLt(n){return (n.replace(/(?:^|\s*)第\s*(?:\d+|[零一二三四五六七八九十百千万]+)\s*[章段落节回集]?\s*/g," ").replace(/\s{2,}/g," ").trim())||n.trim()}
 function whFt(n){let t=whT1.exec(n);if(t)return whCn(t[1]);let r=whCt.exec(n);if(r){let o=r[0].replace(/^第|[零一二三四五六七八九十百千万章段落节回]$/,""),e=whCn(o);if(e>0&&e<1e4)return e}return null}
 function whHt(n,t){let r=n.toLowerCase(),o=null;for(let e of t)r.includes(e)&&(!o||e.length>o[1].length)&&(o=[e,e]);return o}
-function whBt(n){let t=n.trim();if(!t)return null;for(let u of whNextKw)if(t.includes(u))return{intent:"NEXT_EPISODE",bookTitle:"",chapterIndex:null,relativeOffset:1,rawQuery:t};for(let u of whPrevKw)if(t.includes(u))return{intent:"PREV_EPISODE",bookTitle:"",chapterIndex:null,relativeOffset:-1,rawQuery:t};for(let u of whStopKw)if(t.includes(u))return{intent:"STOP",bookTitle:"",chapterIndex:null,relativeOffset:null,rawQuery:t};let r=whHt(t,whOtKw);if(!r)return null;let o=r[0],e=t.indexOf(o)+o.length,s=t.slice(e).trim(),i=whFt(s),a=whLt(s);return!a&&i===null?null:{intent:i?"PLAY_EPISODE":"PLAY_BOOK",bookTitle:a,chapterIndex:i,relativeOffset:null,rawQuery:t}}
+function whBt(n){let t=n.trim();if(!t)return null;for(let u of whNextKw)if(t.includes(u))return{intent:"NEXT_EPISODE",bookTitle:"",chapterIndex:null,relativeOffset:1,rawQuery:t};for(let u of whPrevKw)if(t.includes(u))return{intent:"PREV_EPISODE",bookTitle:"",chapterIndex:null,relativeOffset:-1,rawQuery:t};for(let u of whStopKw)if(t.includes(u))return{intent:"STOP",bookTitle:"",chapterIndex:null,relativeOffset:null,rawQuery:t};let r=whHt(t,whOtKw);if(!r)return null;let o=r[0],e=t.indexOf(o)+o.length,s=t.slice(e).trim(),i=whFt(s),a=whLt(s);if(a)a=whNorm(a);return!a&&i===null?null:{intent:i?"PLAY_EPISODE":"PLAY_BOOK",bookTitle:a,chapterIndex:i,relativeOffset:null,rawQuery:t}}
 
 var whJ={},whL={},whUnd={},whQ={};
 function whOt(n,t,r,o,e,s){whJ[t]={deviceId:t,bookId:r,chapterId:o,chapterIndex:e,bookTitle:s,updatedAt:Date.now()};whLog("webhook","session updated",`did=${t} book="${s}" ch#${e}`,null)}
@@ -1701,14 +1703,20 @@ async function whNt(n,t){let hostUrl=songloft.plugin&&songloft.plugin.getHostUrl
 function whWt(n,t){if(t&&typeof t=="string")return t.trim();if(!Array.isArray(n)||n.length===0)return null;for(let r of n){let o=r.question;if(o)return o.trim();let s=r.intention?.query;if(s)return s.trim();let i=r.message;if(i?.response?.answer){let a=i.response.answer;if(a.length>0){let u=a[0],c=u.question;if(c)return c.trim();let g=u.intention?.query;if(g)return g.trim()}}}return null}
 function whJt(){return"/api/webhook/said"}
 async function whGetTok(){try{return songloft.plugin&&songloft.plugin.getToken?await songloft.plugin.getToken():""}catch{return""}}
-async function whPush(n,t,r,o,e,s){try{let i=await whGetTok(),a=n.getSettings().serverHost||"";if(!a)return songloft.log.warn("[webhook] serverHost 未设置，语音口令推送音响将无法工作，请在音响插件中配置正确的局域网地址"),whLog("error","推送准备","serverHost 未设置","❌"),!1;let u=`/api/v1/jsplugin/audiobook/api/books/${encodeURIComponent(o.id)}/chapters/${encodeURIComponent(e.id)}/audio`,c=[];i&&c.push(`access_token=${encodeURIComponent(i)}`),s>0&&c.push(`seek=${s}`);let l=c.length>0?`${a}${u}?${c.join("&")}`:`${a}${u}`;songloft.log.info(`[webhook] pushChapterToMiot start book="${o.title}" ch="${e.title}" seek=${s} aid=${t} did=${r}`);let g=await D(e.fileRelPath);songloft.log.info(`[webhook] file ready: ${g}`);let p=await songloft.fs.stat(g).catch(()=>null);if(!p||!Number(p.size)||Number(p.size)<100)return whLog("error","推送准备",`文件不可用: ${g} (size=${p?.size??"N/A"})`,"❌"),songloft.log.error(`[webhook] playable file missing or empty: ${g}`),!1;let k=JSON.stringify({account_id:t,device_id:r,url:l}),R={"Content-Type":"application/json"};i&&(R.Authorization=`Bearer ${i}`);let y=await whNt("/mina/play-url",n);songloft.log.info(`[webhook] POST ${y}`),whLog("voice","指令推送音响",`url="${l}"`,null);let h=await fetch(y,{method:"POST",headers:R,body:k});songloft.log.info(`[webhook] status=${h.status}`);let m=await h.text();songloft.log.info(`[webhook] response(${m.length}): ${m.substring(0,200)}`);let P=!1;if(h.ok)try{P=!!JSON.parse(m).success}catch{P=m.includes("success")}if(songloft.log.info(`[webhook] pushed to miot: ${P?"OK":"FAILED"} book="${o.title}" ch="${e.title}`),P){let b=e.duration??0;try{b=await H(e.fileRelPath),b>0?songloft.log.info(`[push] probed dur=${b}s for "${o.title}" #${e.index}`):(songloft.log.warn(`[push] probe returned 0, using cached: ${b}s`),b=e.duration??0)}catch($){songloft.log.warn(`[push] probe failed: ${String($)}, using cached`),b=e.duration??0}n.setProgress(o.id,e.id,s,b).catch(()=>{});let w=typeof e.index=="number"?e.index:0;whOt(t,r,o.id,e.id,w,o.title),whQ[o.id+"_"+r]=Date.now(),await n.addRecentlyPlayed(o.id,e.id).catch(()=>{}),whGetTok().then($=>whXt(n,t,r,o,e,$)).catch(()=>{})}return P}catch(i){let a=i instanceof Error?i.message:String(i);return whLog("error","推送音响失败",`book="${o?.title||"?"}" ch="${e?.title||"?"}" err=${a}`,"❌"),songloft.log.error(`[webhook] push failed: book="${o?.title||"?"}" ch="${e?.title||"?"}" err=${a}`),!1}}
+async function whPush(n,t,r,o,e,s){try{let i=await whGetTok(),a=n.getSettings().serverHost||"";if(!a)return songloft.log.warn("[webhook] serverHost 未设置，语音口令推送音响将无法工作，请在音响插件中配置正确的局域网地址"),whLog("error","推送准备","serverHost 未设置","❌"),!1;let u=`/api/v1/jsplugin/audiobook/api/books/${encodeURIComponent(o.id)}/chapters/${encodeURIComponent(e.id)}/audio`,c=[];i&&c.push(`access_token=${encodeURIComponent(i)}`),s>0&&c.push(`seek=${s}`);let l=c.length>0?`${a}${u}?${c.join("&")}`:`${a}${u}`;songloft.log.info(`[webhook] pushChapterToMiot start book="${o.title}" ch="${e.title}" seek=${s} aid=${t} did=${r}`);let g=await D(e.fileRelPath);songloft.log.info(`[webhook] file ready: ${g}`);let p=await songloft.fs.stat(g).catch(()=>null);if(!p||!Number(p.size)||Number(p.size)<100)return whLog("error","推送准备",`文件不可用: ${g} (size=${p?.size??"N/A"})`,"❌"),songloft.log.error(`[webhook] playable file missing or empty: ${g}`),!1;let k=JSON.stringify({account_id:t,device_id:r,url:l}),R={"Content-Type":"application/json"};i&&(R.Authorization=`Bearer ${i}`);try{let ys=await whNt("/mina/stop",n);let hs=await fetch(ys,{method:"POST",headers:R,body:JSON.stringify({account_id:t,device_id:r})});songloft.log.info(`[webhook] stop prior media status=${hs.status}`)}catch(stopErr){songloft.log.warn(`[webhook] stop prior media failed: ${String(stopErr)}`)}let y=await whNt("/mina/play-url",n);songloft.log.info(`[webhook] POST ${y}`),whLog("voice","指令推送音响",`url="${l}"`,null);let h=await fetch(y,{method:"POST",headers:R,body:k});songloft.log.info(`[webhook] status=${h.status}`);let m=await h.text();songloft.log.info(`[webhook] response(${m.length}): ${m.substring(0,200)}`);let P=!1;if(h.ok)try{P=!!JSON.parse(m).success}catch{P=m.includes("success")}if(songloft.log.info(`[webhook] pushed to miot: ${P?"OK":"FAILED"} book="${o.title}" ch="${e.title}`),P){let b=e.duration??0;try{b=await H(e.fileRelPath),b>0?songloft.log.info(`[push] probed dur=${b}s for "${o.title}" #${e.index}`):(songloft.log.warn(`[push] probe returned 0, using cached: ${b}s`),b=e.duration??0)}catch($){songloft.log.warn(`[push] probe failed: ${String($)}, using cached`),b=e.duration??0}n.setProgress(o.id,e.id,s,b).catch(()=>{});let w=typeof e.index=="number"?e.index:0;whOt(t,r,o.id,e.id,w,o.title),whQ[o.id+"_"+r]=Date.now(),await n.addRecentlyPlayed(o.id,e.id).catch(()=>{}),whGetTok().then($=>whXt(n,t,r,o,e,$)).catch(()=>{})}return P}catch(i){let a=i instanceof Error?i.message:String(i);return whLog("error","推送音响失败",`book="${o?.title||"?"}" ch="${e?.title||"?"}" err=${a}`,"❌"),songloft.log.error(`[webhook] push failed: book="${o?.title||"?"}" ch="${e?.title||"?"}" err=${a}`),!1}}
 async function whYt(n){let t=n.account_id,r=n.device_id;return!t||!r?{reason:"请求体缺少 account_id / device_id，请由 miot-plus 自动传递（勿手动构造空 payload）"}:(songloft.log.info(`[webhook] target from payload: aid=${t} did=${r}`),{accountId:t,deviceId:r})}
 async function whKt(n,t,r,o){let e=t.bookTitle;if(!e&&t.intent!=="NEXT_EPISODE"&&t.intent!=="PREV_EPISODE"&&t.intent!=="STOP")return whLog("error","参数缺失",`intent=${t.intent} bookTitle 为空`,"❌"),!1;let s=null;if(e&&(s=whGt(n,e),!s))return whLog("error","书籍不存在",`book="${e}"`,"❌"),!1;switch(t.intent){case"STOP":{songloft.log.info(`[webhook] STOP playback on device ${o}`);let i=whJ[o];if(i){let a=n.getBookById(i.bookId);if(a){let u=0;try{let l=await whNt(`/mina/status?account_id=${r}&device_id=${o}`,n),g=await fetch(l,{headers:{"Content-Type":"application/json"}});if(g.ok){let p=await g.json();p.success&&p.data&&(u=p.data.position??0)}}catch{}let c=a.chapters.find(l=>l.id===i.chapterId);c&&(n.setProgress(a.id,i.chapterId,u,c.duration).catch(()=>{}),songloft.log.info(`[webhook] STOP saved progress: "${a.title}" #${i.chapterIndex} "${c.title}" pos=${u}s`),whLog("voice","停止播放并保存进度",`${a.title} #${i.chapterIndex} pos=${u.toFixed(0)}s/${c.duration}s`,null)),await n.addRecentlyPlayed(a.id,i.chapterId),songloft.log.info(`[webhook] stopped book "${a.title}" #${i.chapterIndex}, updated recentlyPlayed`)}}else whLog("voice","停止播放",`msg="${t.rawQuery}"`,null);return whEt(o),!0}case"PLAY_EPISODE":{let i=t.chapterIndex,a=n.getBookById(s.id)?.chapters??[];if(a.length===0)return whLog("error","执行失败",`"${s.title}" 无章节`,"❌"),!1;if(!i||i<1)return whLog("error","章节号无效",`book="${e}" chapterIndex=${i}`,"❌"),!1;let u=Math.max(1,Math.min(i,a.length)),c=a.find(l=>l.index===u);return c?(songloft.log.info(`[webhook] PLAY_EPISODE "${s.title}" #${c.index} "${c.title}"`),await whPush(n,r,o,s,c,0)):(whLog("error","章节不存在",`book="${e}" chapterIndex=${i}`,"❌"),!1)}case"PLAY_BOOK":{let a=n.getRecentlyPlayed().find(c=>c.bookId===s.id),u=0;if(a){let c=n.getProgress(s.id,a.chapterId);u=c.position>10?c.position:0,songloft.log.info(`[webhook] PLAY_BOOK "${s.title}" resume at ${u}s from ch=${a.chapterId}`)}else{let c=n.getBookById(s.id);songloft.log.info(`[webhook] PLAY_BOOK "${s.title}" first time, ${c?.chapters?.length||0} chapters`),u=0}if(a){let c=n.getChapter(s.id,a.chapterId);return c?await whPush(n,r,o,s,c,u):(whLog("error","章节缺失",`book="${e}" chapterId=${a.chapterId}`,"❌"),!1)}else{let l=n.getBookById(s.id)?.chapters?.[0];return l?await whPush(n,r,o,s,l,0):(whLog("error","无可用章节",`book="${e}" 暂无章节`,"❌"),!1)}}case"NEXT_EPISODE":{let i=whJ[o];if(!i)return whLog("error","无会话","尚未推送过有声书，请先播放某本书","❌"),!1;let a=n.getBookById(i.bookId);if(!a)return whLog("error","书籍不存在",`bookId=${i.bookId}`,"❌"),!1;let u=a.chapters.find(l=>l.id===i.chapterId);if(!u)return whLog("error","当前章节缺失",`chapterId=${i.chapterId}`,"❌"),!1;let c=a.chapters.find(l=>l.index===u.index+1);return c?(songloft.log.info(`[webhook] NEXT_EPISODE "${a.title}" #${u.index} → #${c.index}`),await whPush(n,r,o,a,c,0)):(songloft.log.info("[webhook] NEXT_EPISODE: already at end"),!1)}case"PREV_EPISODE":{let i=whJ[o];if(!i)return whLog("error","无会话","尚未推送过有声书，请先播放某本书","❌"),!1;let a=n.getBookById(i.bookId);if(!a)return whLog("error","书籍不存在",`bookId=${i.bookId}`,"❌"),!1;let u=a.chapters.find(l=>l.id===i.chapterId);if(!u)return whLog("error","当前章节缺失",`chapterId=${i.chapterId}`,"❌"),!1;let c=a.chapters.find(l=>l.index===u.index-1);return c?(songloft.log.info(`[webhook] PREV_EPISODE "${a.title}" #${u.index} → #${c.index}`),await whPush(n,r,o,a,c,0)):(songloft.log.info("[webhook] PREV_EPISODE: already at start"),!1)}default:return whLog("error","未知意图",`intent=${t.intent}`,"❌"),!1}}
 function whEt(n){whL[n]&&(clearInterval(whL[n]),delete whL[n]),delete whUnd[n],delete whQ[n]}
 async function whXt(n,t,r,o,e,s){whEt(r);let i=typeof e.index=="number"?e.index:0;whUnd[r]={accountId:t,bookId:o.id,chapterId:e.id,chapterIndex:i,bookTitle:o.title};let a=n.getProgress(o.id,e.id)?.duration??0;if(!a||a<=0){try{a=await H(e.fileRelPath);if(a>0){n.setProgress(o.id,e.id,0,a).catch(()=>{});songloft.log.info("[auto-next] probed dur="+a+"s for "+JSON.stringify(o.title)+" #"+i)}else{a=e.duration??0;songloft.log.warn("[auto-next] probe returned 0, using cached: "+a+"s")}whLog("speaker","自动下一集已开启",o.title+" "+e.title+" dur="+a+"s → 等待播放结束",null)}catch(c){songloft.log.warn("[auto-next] probe error: "+String(c)+", using cached");a=e.duration??0;whLog("speaker","自动下一集已开启",o.title+" "+e.title+" (dur未知) → 等待播放结束",null)}}
 else whLog("speaker","自动下一集已开启",o.title+" "+e.title+" (dur="+a+"s)",null);
-if(a>0){let u=setInterval(async()=>{try{let c=await n.getProgress(o.id,e.id);if(c&&c.position>0&&c.position>=a-3){clearInterval(u);whL[r]=null;let x=n.getBookById(o.id);if(x){let w=x.chapters.find(z=>z.index===i+1);if(w){let T=typeof w.index=="number"?w.index:0;whOt(t,r,o.id,w.id,T,o.title);whUnd[r]={accountId:t,bookId:o.id,chapterId:w.id,chapterIndex:T,bookTitle:o.title};whLog("speaker","自动下一章推送成功",o.title+" "+w.title,"✅");try{await whPush(n,t,r,o,w,0)}catch(_){}}else{whLog("speaker","自动下一集已结束",o.title+" 已达最后一集",null);songloft.log.info("[auto-next] reached last chapter");whEt(r)}}else whEt(r)}}catch(_){}},3e3);whL[r]=u}}
-function whGt(n,t){let o=t.toLowerCase(),e=null,s=0;for(let a of n.books){if(a.virt||a.hidden||a.mergedInto)continue;let ov=n.settings&&n.settings.titleOverrides?n.settings.titleOverrides[a.id]||"":"";for(let c of [a.title||"",ov]){let ci=c.toLowerCase();if(!ci)continue;if(ci===o)return n.getBookById(a.id);if(ci.includes(o)&&c.length>s){e=n.getBookById(a.id);s=c.length}}}return e}
+if(!a||a<=0){songloft.log.error("[auto-next] no duration available for "+o.title+" #"+i+", aborting auto-next");return}
+await new Promise(c=>setTimeout(c,3e3));if(!whUnd[r])return;whQ[o.id+"_"+r]=Date.now();whLog("speaker","自动下一集轮询已启动",o.title+" "+e.title,null);
+let u=setInterval(async()=>{if(!whUnd[r]){clearInterval(u);delete whL[r];return}let c=whUnd[r];try{let l=n.getProgress(c.bookId,c.chapterId)?.duration??0;if(!l||l<=0){let k=n.getBookById(c.bookId)?.chapters.find(z=>z.id===c.chapterId);if(k)try{let z2=await H(k.fileRelPath);if(z2>0){l=z2;n.setProgress(c.bookId,c.chapterId,0,l).catch(()=>{});songloft.log.info("[auto-next] late-probed dur="+l+"s for "+c.bookTitle+" #"+c.chapterIndex)}}catch(_){}if(!l||l<=0)return}
+let adv=!1;try{let su=await whNt("/mina/status?account_id="+c.accountId+"&device_id="+r,n),hd={};s&&(hd.Authorization="Bearer "+s);hd["Content-Type"]="application/json";let rp=await fetch(su,{headers:hd});if(!rp.ok)return;let rj=await rp.json();if(!rj.success||!rj.data)return;let dt=rj.data,m=dt.position??0,pl=dt.is_playing??dt.state==="playing",idl=dt.state==="idle";if(!pl&&(m>=l||idl)){adv=!0;songloft.log.info("[auto-next] pos-based: pos="+m+"/"+l+"s played="+pl+" idle="+idl+" -> advance");whLog("speaker","检测到章节结束 (pos="+Math.round(m)+"s/"+l+"s)，推送下一章",c.bookTitle+" #"+c.chapterIndex,null)}else{console.log("[auto-next] status: pos="+m+"/"+l+"s played="+pl+" idle="+idl);let t0=whQ[c.bookId+"_"+r];if(t0){let el=(Date.now()-t0)/1e3;if(el>=l+1){adv=!0;songloft.log.info("[auto-next] timer-based: elapsed="+Math.round(el)+"s dur="+l+"s -> advance");whLog("speaker","计时判定章节结束 ("+Math.round(el)+"s/"+(l+1)+"s)，推送下一章",c.bookTitle+" #"+c.chapterIndex,null)}}}}catch(_){return}
+if(!adv)return;
+let x=n.getBookById(c.bookId);if(!x){whEt(r);return}let w=x.chapters.find(z=>z.index===c.chapterIndex+1);if(!w){whLog("speaker","自动下一集已结束",c.bookTitle+" 已达最后一集",null);songloft.log.info("[auto-next] reached last chapter");whEt(r);return}
+let T=typeof w.index=="number"?w.index:0;songloft.log.info("[auto-next] -> "+x.title+" #"+c.chapterIndex+" -> #"+T);whOt(t,r,x.id,w.id,T,x.title);whUnd[r]={accountId:t,bookId:x.id,chapterId:w.id,chapterIndex:T,bookTitle:x.title};let pk=await whPush(n,t,r,x,w,0);if(pk)whLog("speaker","自动下一章推送成功",x.title+" "+w.title,"✅")}catch(_){}},3e3);whL[r]=u}
+function whGt(n,t){let o=t.toLowerCase(),on=whNorm(t),e=null,s=-1;for(let a of n.books){if(a.virt||a.hidden||a.mergedInto)continue;let ov=n.settings&&n.settings.titleOverrides?n.settings.titleOverrides[a.id]||"":"";let vm=n.settings&&n.settings.voiceAliases?n.settings.voiceAliases[a.id]||"":"";let vs=vm?vm.split(/[\s,，、]+/).filter(Boolean):[];for(let c of [a.title||"",ov].concat(vs)){let ci=c.toLowerCase();if(!ci)continue;let cn=whNorm(c);let ex=ci===o||cn===on;let sub=!ex&&(ci.includes(o)||(on&&on!==o&&cn.includes(on)));if(ex){if(1e9>s){e=n.getBookById(a.id);s=1e9}}else if(sub){if(c.length>s){e=n.getBookById(a.id);s=c.length}}}}return e}
 
 // ===== Webhook 路由 =====
 async function whExec(g,aid,did){try{var _dk="d"+(did||"")+"|"+String(g).trim(),_nn=Date.now();if(WHSEEN[_dk]&&_nn-WHSEEN[_dk]<8000){songloft.log.info("[webhook] dup ignored: "+g);return{executed:false,reason:"dup"}}if(Object.keys(WHSEEN).length>300)WHSEEN={};WHSEEN[_dk]=_nn;var p=whBt(String(g).trim());if(!p){songloft.log.info("[webhook] non-matching intent: "+g);whLog("speaker","意图未匹配","msg="+g,null);return{executed:false,reason:"no_match"}}songloft.log.info("[webhook] matched intent: "+p.intent+" book="+p.bookTitle+" chapter="+p.chapterIndex);whLog("voice","意图匹配","msg="+g+" "+p.intent+" book="+p.bookTitle+" chapter="+p.chapterIndex,null);var k=await whYt({account_id:aid,device_id:did});if("reason" in k){whLog("error","设备查找",k.reason,"\u274c");return{error:k.reason}}var ok=await whKt(t,p,k.accountId,k.deviceId);if(ok){var lab=p.intent==="PLAY_EPISODE"?"播放章节":p.intent==="PLAY_BOOK"?"播放书籍":p.intent==="NEXT_EPISODE"?"下一集":p.intent==="PREV_EPISODE"?"上一集":p.intent==="STOP"?"停止播放":"未知";whLog("voice",lab,"msg="+g,"\u2705");return{executed:true,intent:p.intent,bookTitle:p.bookTitle}}whLog("error","执行失败","msg="+g+" "+p.intent+" book="+p.bookTitle,"\u274c");return{error:"执行失败"}}catch(e){songloft.log.error("[webhook] exec error: "+String(e));return{error:String((e&&e.message)||e)}}}
@@ -1867,6 +1875,11 @@ def patch_static(build_dir: str) -> None:
               "          <label for=\"editTitle\">别名（显示用）</label>\n"
               "          <input type=\"text\" id=\"editTitle\" placeholder=\"留空则显示原名\" />\n"
               "          <div class=\"edit-title-orig\" id=\"editTitleOrig\"></div>\n"
+              "        </div>\n"
+              "        <div class=\"edit-field\">\n"
+              "          <label for=\"editVoice\">语音匹配名（仅语音指令用）</label>\n"
+              "          <input type=\"text\" id=\"editVoice\" placeholder=\"多个用空格/逗号/、分隔，留空则按别名或原名匹配\" />\n"
+              "          <div class=\"edit-title-orig\" id=\"editVoiceHint\"></div>\n"
               "        </div>\n"
               "        <div class=\"edit-field\">\n"
               "          <label>书籍路径（相对书库根目录）</label>\n"
@@ -2525,6 +2538,8 @@ def patch_static(build_dir: str) -> None:
               "e.originalTitle?(e.originalTitle!==e.title?"
               "\"\\u522B\\u540D\\u751F\\u6548\\uFF0C\\u539F\\u540D\\uFF1A\"+e.originalTitle"
               ":\"\\u672A\\u8BBE\\u7F6E\\u522B\\u540D\\uFF0C\\u663E\\u793A\\u539F\\u540D\\uFF1A\"+e.originalTitle):\"\","
+              "window.__editVoice=e.voiceAlias||\"\","
+              "document.getElementById(\"editVoice\").value=e.voiceAlias||\"\","
               "document.getElementById(\"editBookPath\").value=__relPath(e.folderRelPath),"
               "document.getElementById(\"editDescription\").value=e.description||\"\",")
     js = rep(js, j5_old, j5_new, "J5")
@@ -2548,7 +2563,13 @@ def patch_static(build_dir: str) -> None:
         "let __send=__nt===__orig?\"\":__nt;"
         "await y(`/api/books/${t}/title`,{method:\"POST\","
         "body:JSON.stringify({title:__send}),"
-        "headers:{\"Content-Type\":\"application/json\"}})}}")
+        "headers:{\"Content-Type\":\"application/json\"}})}}"
+        "{let __nv=document.getElementById(\"editVoice\").value.trim();"
+        "if(__nv!==window.__editVoice){__tChanged=!0;"
+        "await y(`/api/books/${t}/voice`,{method:\"POST\","
+        "body:JSON.stringify({voice:__nv}),"
+        "headers:{\"Content-Type\":\"application/json\"}})}"
+        "}")
     js = rep(js, j7_old, j7_new, "J7")
 
     # J8: 别名变化时保存后刷新首页列表（详情页由 R(t) 刷新）
